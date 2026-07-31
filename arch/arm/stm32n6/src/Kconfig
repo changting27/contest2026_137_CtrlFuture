@@ -303,6 +303,20 @@ config STM32_DMA2D
 		GPDMA1, whose CID is fixed by ROM and cannot be granted).  Fully
 		on-chip: no external wiring or instrument required.
 
+config STM32_RISAF_PROBE
+	bool "RISAF firewall write-access probe"
+	default n
+	---help---
+		Enable the arch helper stm32n6_risaf_probe(), a one-shot test of
+		whether NuttX firmware can write RISAF configuration registers in
+		DEV boot.  It targets a disabled RISAF region (BREN stays 0, so no
+		access enforcement is altered), writes then reads back a CIDCFGR
+		whitelist pattern, and restores the original value.  The result
+		decides ADR-039: if the write sticks, ADR-029/032 DMA-to-SRAM can
+		be unblocked from firmware without flash-boot; if it is RAZ/WI, the
+		RISAF config space is locked to higher privilege and a custom FSBL
+		is required.  Fully on-chip: no external wiring or instrument.
+
 config STM32_RTC
 	bool "RTC (Real-Time Clock)"
 	default n

@@ -86,6 +86,10 @@ ifeq ($(CONFIG_STM32_DMA2D),y)
   CHIP_CSRCS += stm32n6_dma2d.c
 endif
 
+ifeq ($(CONFIG_STM32_RISAF_PROBE),y)
+  CHIP_CSRCS += stm32n6_risaf_probe.c
+endif
+
 ifeq ($(CONFIG_DEV_GPIO),y)
   CHIP_CSRCS += stm32n6_gpio_lower.c
 endif

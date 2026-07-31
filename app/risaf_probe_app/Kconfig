@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_137_RISAF_PROBE_APP
+	bool "Contest 2026 team 137 RISAF firewall write-access probe"
+	default n
+	depends on STM32_RISAF_PROBE
+	---help---
+		Enable the contest 2026 team 137 RISAF write-access probe
+		(risaf_probe).  Tests whether NuttX firmware can write RISAF
+		configuration registers in DEV boot: it writes and reads back a
+		CIDCFGR whitelist pattern on a DISABLED RISAF region (BREN stays
+		0, so no access enforcement is altered) and restores the original
+		value.  If the write sticks, the SRAM RISAF region can be granted
+		a DMA master's CID from firmware, unblocking ADR-029/032 without
+		flash-boot; if it is RAZ/WI, the RISAF config space is locked to
+		higher privilege and a custom FSBL is required (ADR-039).  Fully
+		on-chip; no external wiring or instrument.  Requires
+		STM32_RISAF_PROBE.

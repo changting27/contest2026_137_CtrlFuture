@@ -1,0 +1,7 @@
+############################################################################
+# Contest 2026 team 137 RISAF firewall write-access probe - Make.defs
+############################################################################
+
+ifneq ($(CONFIG_LVX_USE_DEMO_CONTEST2026_137_RISAF_PROBE_APP),)
+CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_137_risaf_probe_app
+endif

@@ -82,6 +82,10 @@ if(CONFIG_STM32_DMA2D)
   list(APPEND SRCS stm32n6_dma2d.c)
 endif()
 
+if(CONFIG_STM32_RISAF_PROBE)
+  list(APPEND SRCS stm32n6_risaf_probe.c)
+endif()
+
 if(CONFIG_STM32_I2C1 OR CONFIG_STM32_I2C2 OR CONFIG_STM32_I2C4)
   list(APPEND SRCS stm32n6_i2c.c)
 endif()
