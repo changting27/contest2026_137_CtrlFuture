@@ -48,6 +48,10 @@
 
 void stm32_boardinitialize(void);
 
+#ifdef CONFIG_STM32_RISAF_EARLY_PROBE
+void stm32n6_risaf_early_probe(void);
+#endif
+
 /* __start_c() carries the real boot logic; __start() below is a naked
  * dispatcher that clears the boot-ROM stack limits before any compiler
  * prologue runs.  __start_c is reached via "b __start_c" from __start's
@@ -317,6 +321,16 @@ void __start_c(void)
 
   stm32n6_lowsetup();
   showprogress('A');
+
+#ifdef CONFIG_STM32_RISAF_EARLY_PROBE
+  /* Investigate RISAF in the earliest safe window: console up, heap not yet
+   * initialised (memory layout still "virgin").  Purely observational --
+   * dumps the active SRAM region map and re-confirms CIDCFGR writability,
+   * enabling no region and restoring every value.  See ADR-039.
+   */
+
+  stm32n6_risaf_early_probe();
+#endif
 
   /* Call board early initialization */
 

@@ -86,7 +86,7 @@ ifeq ($(CONFIG_STM32_DMA2D),y)
   CHIP_CSRCS += stm32n6_dma2d.c
 endif
 
-ifeq ($(CONFIG_STM32_RISAF_PROBE),y)
+ifneq ($(CONFIG_STM32_RISAF_PROBE)$(CONFIG_STM32_RISAF_EARLY_PROBE),)
   CHIP_CSRCS += stm32n6_risaf_probe.c
 endif
 

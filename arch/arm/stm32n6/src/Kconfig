@@ -317,6 +317,23 @@ config STM32_RISAF_PROBE
 		RISAF config space is locked to higher privilege and a custom FSBL
 		is required.  Fully on-chip: no external wiring or instrument.
 
+config STM32_RISAF_EARLY_PROBE
+	bool "RISAF early-boot region map + writability probe"
+	default n
+	---help---
+		Run stm32n6_risaf_early_probe() from __start_c(), after the console
+		is up but before nx_start() (heap not yet initialised).  This is the
+		earliest safe boot window and the timing ADR-039 argues a real
+		DMA->SRAM unlock should use.  The probe is purely observational: it
+		dumps the ACTIVE (BREN=1) region map of the SRAM firewalls (RISAF2
+		governs the CPU code/stack SRAM, RISAF21/22 the AXI SRAM banks) so
+		the region covering the running firmware can be told apart from free
+		address space, and re-confirms CIDCFGR is firmware-writable this
+		early on the disabled RISAF21 REG[0] scratch region.  Enables no
+		region, sets no GLOCK, restores every value; it proves feasibility
+		of an early unlock without performing it.  Output goes to the
+		console via arm_lowputc() ("risaf-early: ..." lines).
+
 config STM32_RTC
 	bool "RTC (Real-Time Clock)"
 	default n
