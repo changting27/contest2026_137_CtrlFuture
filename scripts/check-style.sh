@@ -20,8 +20,9 @@ FILES=$(find "$CONTEST_DIR/board" "$CONTEST_DIR/app" "$CONTEST_DIR/arch" \
 
 for f in $FILES; do
     # 运行 nxstyle（过滤 vendor 路径误报）
-    OUTPUT=$(nuttx/tools/nxstyle "$f" 2>&1 | \
-        grep -v "Path relative to repository" || true)
+    OUTPUT=$(nuttx/tools/nxstyle "$f" 2>&1 \
+        | grep -v "Path relative to repository" \
+        | grep -v "Relative file path does not match actual file" || true)
     if [ -n "$OUTPUT" ]; then
         echo "--- $f ---"
         echo "$OUTPUT"

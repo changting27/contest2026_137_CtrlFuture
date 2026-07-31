@@ -18,7 +18,9 @@ echo ""
 echo "=== 2. nxstyle 编码规范检查 ==="
 STYLE_FAIL=0
 for f in $(find $FIND_DIRS -name "*.c" -o -name "*.h" 2>/dev/null); do
-    OUTPUT=$(nuttx/tools/nxstyle "$f" 2>&1 | grep -v "Path relative" || true)
+    OUTPUT=$(nuttx/tools/nxstyle "$f" 2>&1 \
+        | grep -v "Path relative" \
+        | grep -v "Relative file path does not match actual file" || true)
     if [ -n "$OUTPUT" ]; then
         echo "$OUTPUT"
         STYLE_FAIL=1
