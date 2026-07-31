@@ -78,7 +78,7 @@
 | 19 | XSPI Flash 启动 | [019](adr/ADR-019.md) | 018 | MEASURED | **PARTIAL**（仅 Renode 回归；真机全程 DEV boot，未 flash-boot 冷启动） |
 | 20 | SDMMC 驱动 | [020](adr/ADR-020.md) | 005, 006, 011 | MEASURED | **DONE** |
 | 21 | FMC 存储控制器 | [021](adr/ADR-021.md) | 005, 006 | MEASURED | |
-| 39 | Flash 启动（FSBL + RISAF） | [039](adr/ADR-039.md) | 018, 019 | MEASURED | **PROPOSED**（路线固化，暂不动手；解锁 029/032/036） |
+| 39 | Flash 冷启动（FSBL + XSPI） | [039](adr/ADR-039.md) | 018, 019 | MEASURED | **PROPOSED**（路线固化，暂不动手；掉电持久冷启动，不含 RISAF 解锁） |
 
 ## P3: 通信
 
@@ -121,13 +121,18 @@
 >   （EdgeSight 无电机控制/互补 PWM/死区需求）；通用定时/PWM/输入
 >   捕获需求由 ADR-027 覆盖并真机 MEASURED。
 > - **029 PARTIAL**：ADR-029 ADC VREFINT 轮询真机 MEASURED、ADC2
->   scan/AWD 已实现；ADC DMA 路径在 DEV boot 下被 RISAF 防火墙拦截
->   （需 RISAF CID 授权而非驱动改动），已文档化并延后。
+>   scan/AWD 已实现；ADC DMA 路径在 DEV boot 下写 SRAM 被 RISAF 拦截。
+>   **更正（2026-07-31）**：根因不是「固件无权配 RISAF」，而是驱动从未在
+>   区域侧给 DMA 缓冲划专属 region 并授权其 CID。M55=TDCID 可在 NuttX 早期
+>   `__start` 编程 RISAF 解锁——属独立小专题，非必须 FSBL。详见
+>   ADR-039「RISAF 可写性真机探针」。
 > - **032 PARTIAL**：ADR-032 DMA2D 去风险探针真机 MEASURED——逐 CID 0..7
->   的 register-to-memory 写入均被 RISAF 防火墙拦截（含 CPU 的 CID 1），
->   与 029 同因（DEV boot 下管辖 SRAM 的 RISAF 只放行 CPU 核，不接纳可编程
->   总线主设备的任何 CID）。非驱动缺陷、无法从固件层修复；SRAM 目标的
->   DMA2D 加速待 flash-boot / FSBL RISAF 授权方案。详见 ADR 内「实现现状」。
+>   的 register-to-memory 写入均被 RISAF 防火墙拦截（含 CPU 的 CID 1）。
+>   **更正（2026-07-31）**：探针只改了主设备侧 CID（锁①）、缓冲又落在 CPU
+>   代码区（RISAF2），从未开区域侧锁②（专属活跃 region 白名单）。ST 文档
+>   确认 M55=TDCID 可从 NuttX 早期启动编程 RISAF；把 DMA2D 输出缓冲放进独立
+>   AXISRAM region（RISAF21/22）并授权其 CID 即可解锁，**不必 FSBL**。属
+>   DEV-boot 独立小专题。详见 ADR-039 内更正记录。
 > - **031/033 PARTIAL**：`/dev/fb0`、`/dev/video0` 设备框架已注册，
 >   但 LTDC 寄存器编程与 DCMIPP CMW_CAMERA 调用均未实现；
 >   两者未在任何 defconfig 启用（`CONFIG_VIDEO_FB`/`CONFIG_VIDEO`
@@ -136,12 +141,15 @@
 >   （SHA-256("abc") 对 NIST 向量）均真机 MEASURED。SAES/CRYP 判定 N/A —
 >   STM32N647X0 硅片不含密码学加速器（`SAES_TypeDef`/`CRYP_TypeDef` 仅存在于
 >   N655/N657 SKU 的 CMSIS 头），非文档缺失。
-> - **039 PROPOSED**：flash-boot + 自定义 FSBL 编程 RISAF 的路线专题。真机
->   最终产品需掉电持久冷启动（当前全程 DEV boot），且 029/032/036 被 RISAF
->   内存防火墙拦截的 DMA/NPU→SRAM 功能只能靠 FSBL 授权总线主 CID 解锁。
->   分阶段（阶段 0 探针 flash-boot 默认 RISAF 策略 → 阶段 1 最小冷启动 →
->   阶段 2 条件性自定义 FSBL）。可逆、不烧熔丝、有 DFU 砖机安全网。**当前
->   仅固化路线，待 DEV boot 下可做的 ADR 清完后启动。**
+> - **039 PROPOSED**：flash-boot + FSBL + XSPI **掉电持久冷启动**路线专题。
+>   真机最终产品需脱离 DEV boot 的 SRAM+GDB 加载、独立上电启动。分阶段
+>   （阶段 1 最小冷启动 → 阶段 2 可选确认 flash-boot 下 RISAF region 未被
+>   GLOCK 冻结）。可逆、不烧熔丝、有 DFU 砖机安全网。**当前仅固化路线，待
+>   DEV boot 下可做的 ADR 清完后启动。**
+>   **范围更正（2026-07-31）**：RISAF 解锁 DMA/NPU→SRAM 已从本 ADR 剥离——
+>   `risaf_probe` 真机 + ST RIF 文档证明 M55=TDCID 可从 NuttX 早期 `__start`
+>   编程 RISAF，029/032/036 由独立 DEV-boot 小专题解锁，**不依赖 flash-boot/
+>   FSBL**。
 
 ---
 
@@ -181,9 +189,13 @@ P0                          P1                          P2          P3
             019                                        022 ETH    023 USB
             XSPI Boot                                  024 FDCAN
               │
-              ├──────── 039 Flash 启动 (FSBL + RISAF) ← 018,019
-              │           └─→ 解锁 029 ADC-DMA / 032 DMA2D / 036 NPU
-              │               (RISAF 授权总线主 CID 访问 SRAM)
+              ├──────── 039 Flash 冷启动 (FSBL + XSPI) ← 018,019
+              │           (掉电持久独立上电启动；不含 RISAF 解锁)
+              │
+              │   [独立小专题] RISAF 早期编程 (NuttX __start, 非 FSBL)
+              │     └─→ 解锁 029 ADC-DMA / 032 DMA2D / 036 NPU
+              │         (给 DMA 缓冲划专属 AXISRAM region + 授权其 CID;
+              │          M55=TDCID 可在 DEV boot 直接配, 已 risaf_probe 实测)
               │
               └───────── 038 Secure Boot ← 037 Crypto
 
