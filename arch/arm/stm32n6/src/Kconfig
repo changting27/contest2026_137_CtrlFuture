@@ -303,6 +303,24 @@ config STM32_DMA2D
 		GPDMA1, whose CID is fixed by ROM and cannot be granted).  Fully
 		on-chip: no external wiring or instrument required.
 
+config STM32_DMA2D_UNLOCK
+	bool "DMA2D RISAF-unlock experiment"
+	default n
+	depends on STM32_DMA2D
+	---help---
+		Enable the arch helper stm32n6_dma2d_unlock_probe(), the RISAF
+		unlock experiment.  The plain DMA2D probe showed the SRAM write
+		is dropped by the RISAF default policy (no enabled region), not
+		by a region whitelist.  This helper enables an explicit RISAF2
+		region (RISAF2 governs the AXI SRAM at 0x34000000) whitelisting
+		CID0 (DMA2D) and CID1 (CPU/TDCID), sweeps the DMA2D master CID
+		0..7 with an R2M SRAM fill, and reports which land.  CID0/CID1
+		landing plus CID2..7 dropping proves a NuttX-programmed RISAF
+		region unblocks DMA-to-SRAM in DEV boot without a custom FSBL.
+		Every touched register is restored bit-identical to boot and the
+		whitelist always includes CID1, so the CPU can never be locked
+		out of its own SRAM.  Requires STM32_DMA2D.
+
 config STM32_RISAF_PROBE
 	bool "RISAF firewall write-access probe"
 	default n

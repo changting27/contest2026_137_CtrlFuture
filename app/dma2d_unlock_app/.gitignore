@@ -1,0 +1,6 @@
+# Generated build artifacts (this app is built in-place via the workspace
+# symlink packages/demos/contest2026_137_dma2d_unlock_app).
+.built
+.depend
+Make.dep
+*.o

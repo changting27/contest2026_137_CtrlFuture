@@ -52,5 +52,29 @@
 
 int stm32n6_dma2d_probe(void);
 
+#ifdef CONFIG_STM32_DMA2D_UNLOCK
+
+/****************************************************************************
+ * Name: stm32n6_dma2d_unlock_probe
+ *
+ * Description:
+ *   RISAF-unlock experiment.  Enables an explicit RISAF2 region (RISAF2
+ *   governs AXISRAM0 @ 0x34000000) whitelisting CID0 (DMA2D) and CID1
+ *   (CPU/TDCID), then sweeps the DMA2D master CID 0..7 running an R2M SRAM
+ *   fill.  Determines whether a NuttX-programmed RISAF region unblocks
+ *   DMA-to-SRAM in DEV boot without a custom FSBL.  Restores every touched
+ *   register bit-identical to boot; the whitelist always includes CID1 so
+ *   the CPU can never be locked out of its own SRAM.
+ *
+ * Returned Value:
+ *   Zero (OK) if the CID0 write landed under the enabled region; a negated
+ *   errno otherwise.
+ *
+ ****************************************************************************/
+
+int stm32n6_dma2d_unlock_probe(void);
+
+#endif /* CONFIG_STM32_DMA2D_UNLOCK */
+
 #endif /* CONFIG_STM32_DMA2D */
 #endif /* __ARCH_ARM_SRC_STM32N6_STM32N6_DMA2D_H */

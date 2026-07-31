@@ -54,6 +54,9 @@
 #include "arm_internal.h"
 #include "hardware/stm32_dma2d.h"
 #include "hardware/stm32_rcc.h"
+#ifdef CONFIG_STM32_DMA2D_UNLOCK
+#  include "hardware/stm32_risaf.h"
+#endif
 
 #ifdef CONFIG_STM32_DMA2D
 
@@ -265,5 +268,193 @@ int stm32n6_dma2d_probe(void)
   syslog(LOG_ERR, "dma2d: no CID 0..7 let DMA2D write SRAM (firewalled)\n");
   return -EFAULT;
 }
+
+#ifdef CONFIG_STM32_DMA2D_UNLOCK
+
+/****************************************************************************
+ * Name: stm32n6_dma2d_unlock_probe
+ *
+ * Description:
+ *   RISAF-unlock experiment.  The plain CID sweep (stm32n6_dma2d_probe)
+ *   found that with NO enabled RISAF region anywhere, DMA2D writes to SRAM
+ *   are dropped for every presented CID -- i.e. the block is the RISAF
+ *   *default policy*, not a region whitelist that excludes the DMA master.
+ *   This probe tests the fix directly: enable an explicit RISAF2 region
+ *   (RISAF2 governs AXISRAM0 @ 0x34000000, where the firmware and probe
+ *   buffer live) that whitelists CID0 (DMA2D) and CID1 (CPU/TDCID), then
+ *   sweep the DMA2D master CID 0..7 and see which land.
+ *
+ *   Expected on success: CID0 and CID1 LAND (the whitelist admits them),
+ *   CID2..7 stay DROPPED (proving the whitelist is actually enforced as
+ *   configured, not a blanket allow).  That is decisive evidence that a
+ *   NuttX-programmed RISAF region unblocks DMA-to-SRAM without an FSBL.
+ *
+ *   Safety: the region is programmed while DISABLED (bounds + whitelist
+ *   first, BREN last), the whitelist ALWAYS includes CID1 so the CPU can
+ *   never be locked out of its own SRAM, and every touched field is
+ *   restored bit-identical to boot (BREN cleared first).  STARTR/ENDR are
+ *   byte offsets RELATIVE to STM32_RISAF2_SPACE_BASE (not absolute), 4 KiB
+ *   granularity, both bounds inclusive.  DEV boot makes any misstep
+ *   reset-recoverable (RISAF config is volatile).
+ *
+ * Returned Value:
+ *   OK if the CID0 write landed under the enabled region; -EFAULT if it was
+ *   still dropped; -EBUSY if REG[0] was already enabled or the container was
+ *   locked (aborts without touching hardware); another negated errno on a
+ *   transfer fault.
+ *
+ ****************************************************************************/
+
+int stm32n6_dma2d_unlock_probe(void)
+{
+  uint32_t rb;
+  uint32_t buf_off;
+  uint32_t rstart;
+  uint32_t rend;
+  uint32_t cfgr_before;
+  uint32_t start_before;
+  uint32_t end_before;
+  uint32_t cid_before;
+  uint32_t attr;
+  uint32_t rimc_rb;
+  int      cid0_ret = -EIO;
+  int      ret;
+  int      cid;
+
+  /* Bring up the RIFSC and DMA2D clocks (atomic read-modify-write). */
+
+  modifyreg32(STM32_RCC_AHB3ENR, 0, RCC_AHB3ENR_RIFSCEN);
+  modifyreg32(STM32_RCC_AHB5ENR, 0, RCC_AHB5ENR_DMA2DEN);
+
+  /* Target RISAF2 REG[0] -- RISAF2 governs the AXI SRAM (0x34000000) the
+   * firmware and probe buffer live in.
+   */
+
+  rb = STM32_RISAF_REG(STM32_RISAF2_BASE, 0);
+
+  /* Safety gate: only proceed if REG[0] is disabled and the container is
+   * not globally locked; otherwise abort without touching any register.
+   */
+
+  cfgr_before = getreg32(rb + STM32_RISAF_REG_CFGR);
+  if ((cfgr_before & RISAF_REG_CFGR_BREN) != 0 ||
+      (getreg32(STM32_RISAF2_BASE + STM32_RISAF_CR_OFFSET) &
+       RISAF_CR_GLOCK) != 0)
+    {
+      syslog(LOG_ERR, "dma2d-unlock: RISAF2 REG0 enabled/locked, abort\n");
+      return -EBUSY;
+    }
+
+  /* Region bounds as OFFSETS relative to the RISAF2 protected-space base,
+   * 4 KiB-aligned to cover the whole probe buffer (both bounds inclusive).
+   */
+
+  buf_off = (uint32_t)((uintptr_t)g_dma2d_probe_buf -
+                       STM32_RISAF2_SPACE_BASE);
+  rstart  = buf_off & ~(STM32_RISAF2_GRANULARITY - 1);
+  rend    = (buf_off + sizeof(g_dma2d_probe_buf) - 1) |
+            (STM32_RISAF2_GRANULARITY - 1);
+
+  /* Save the fields we will change so we can restore them bit-identically. */
+
+  start_before = getreg32(rb + STM32_RISAF_REG_STARTR);
+  end_before   = getreg32(rb + STM32_RISAF_REG_ENDR);
+  cid_before   = getreg32(rb + STM32_RISAF_REG_CIDCFGR);
+
+  syslog(LOG_INFO,
+         "dma2d-unlock: RISAF2 REG0 start_off=0x%05lx end_off=0x%05lx "
+         "buf=%p, whitelist CID0|CID1, sweeping DMA2D CID 0..7\n",
+         (unsigned long)rstart, (unsigned long)rend, g_dma2d_probe_buf);
+
+  /* Program bounds + whitelist while the region is still DISABLED, then
+   * enable LAST.  This guarantees there is no window in which an enabled
+   * region carries a whitelist missing CID1 (which would lock the CPU out
+   * of its own SRAM).  The whitelist always includes CID1.
+   */
+
+  putreg32(rstart, rb + STM32_RISAF_REG_STARTR);
+  putreg32(rend, rb + STM32_RISAF_REG_ENDR);
+  putreg32(RISAF_CIDCFGR_RW(RISAF_CIDMASK_CID0 | RISAF_CIDMASK_CID1),
+           rb + STM32_RISAF_REG_CIDCFGR);
+  putreg32(RISAF_REG_CFGR_BREN | RISAF_REG_CFGR_SEC,
+           rb + STM32_RISAF_REG_CFGR);
+
+  /* Read the region registers back.  This is the decisive disambiguation:
+   * if CFGR.BREN reads 0 the region-enable was RAZ/WI (RISAF2's active SRAM
+   * container refuses a NuttX-added region), so a subsequent drop is because
+   * NO region ever took effect -- not proof of a master-side gate.  If BREN
+   * and the bounds/whitelist all read back as written, the region IS live
+   * and a drop must be master-side.
+   */
+
+  syslog(LOG_INFO,
+         "dma2d-unlock: RISAF2 REG0 readback CFGR=0x%08lx (BREN=%lu) "
+         "ST=0x%08lx EN=0x%08lx CID=0x%08lx\n",
+         (unsigned long)getreg32(rb + STM32_RISAF_REG_CFGR),
+         (unsigned long)(getreg32(rb + STM32_RISAF_REG_CFGR) &
+                         RISAF_REG_CFGR_BREN),
+         (unsigned long)getreg32(rb + STM32_RISAF_REG_STARTR),
+         (unsigned long)getreg32(rb + STM32_RISAF_REG_ENDR),
+         (unsigned long)getreg32(rb + STM32_RISAF_REG_CIDCFGR));
+
+  /* Sweep the DMA2D master CID.  With a CID0|CID1 whitelist, CID0 and CID1
+   * should land and CID2..7 should be dropped -- proving the region is
+   * enforced exactly as configured.
+   */
+
+  for (cid = 0; cid <= 7; cid++)
+    {
+      attr = RIFSC_RIMC_ATTR_MCID(cid) | RIFSC_RIMC_ATTR_MSEC |
+             RIFSC_RIMC_ATTR_MPRIV;
+      ret = dma2d_r2m_try(attr);
+
+      /* Read RIMC_ATTR[8] back (dma2d_r2m_try wrote it): if the presented
+       * attribute did not stick, the DMA2D master CID override is RAZ/WI --
+       * DMA2D keeps its ROM-assigned attribute and no region can ever match
+       * it, which is a master-side lock independent of the region config.
+       */
+
+      rimc_rb = getreg32(STM32_RIFSC_RIMC_ATTR(RIF_MASTER_INDEX_DMA2D));
+
+      if (cid == 0)
+        {
+          cid0_ret = ret;
+        }
+
+      syslog(LOG_INFO, "dma2d-unlock: CID %d wrote_attr=0x%08lx "
+             "RIMC_rb=0x%08lx -> %s%s\n", cid,
+             (unsigned long)attr, (unsigned long)rimc_rb,
+             ret == OK        ? "write landed" :
+             ret == -EFAULT   ? "dropped (firewalled)" :
+             ret == -ETIMEDOUT ? "timeout" : "xfer error",
+             (cid <= 1) ? " (expect land)" : " (expect drop)");
+    }
+
+  /* Disable the region and restore every field bit-identical to boot: clear
+   * BREN FIRST so enforcement stops before the bounds/whitelist revert.
+   */
+
+  putreg32(cfgr_before, rb + STM32_RISAF_REG_CFGR);
+  putreg32(start_before, rb + STM32_RISAF_REG_STARTR);
+  putreg32(end_before, rb + STM32_RISAF_REG_ENDR);
+  putreg32(cid_before, rb + STM32_RISAF_REG_CIDCFGR);
+
+  if (cid0_ret == OK)
+    {
+      syslog(LOG_INFO,
+             "dma2d-unlock: an enabled RISAF2 region with CID0 whitelist "
+             "lets DMA2D write SRAM -- NuttX RISAF unlock viable\n");
+    }
+  else
+    {
+      syslog(LOG_ERR,
+             "dma2d-unlock: DMA2D write still dropped under an enabled "
+             "whitelisted region -- block is not region-side\n");
+    }
+
+  return cid0_ret;
+}
+
+#endif /* CONFIG_STM32_DMA2D_UNLOCK */
 
 #endif /* CONFIG_STM32_DMA2D */

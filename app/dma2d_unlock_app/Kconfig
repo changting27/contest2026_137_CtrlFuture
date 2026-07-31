@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_137_DMA2D_UNLOCK_APP
+	bool "Contest 2026 team 137 DMA2D RISAF-unlock experiment"
+	default n
+	depends on STM32_DMA2D_UNLOCK
+	---help---
+		Enable the contest 2026 team 137 DMA2D RISAF-unlock experiment
+		(dma2d_unlock).  Enables an explicit RISAF2 region (RISAF2 governs
+		the AXI SRAM at 0x34000000) whitelisting CID0 (DMA2D) and CID1
+		(CPU/TDCID), then sweeps the DMA2D master CID 0..7 with a
+		register-to-memory SRAM fill and reports which land.  CID0/CID1
+		landing plus CID2..7 dropping proves a NuttX-programmed RISAF
+		region unblocks DMA-to-SRAM in DEV boot without a custom FSBL.
+		Every touched register is restored bit-identical to boot and the
+		whitelist always includes CID1, so the CPU can never be locked out.
+		Fully on-chip; no external wiring or instrument needed.  Requires
+		STM32_DMA2D_UNLOCK.
