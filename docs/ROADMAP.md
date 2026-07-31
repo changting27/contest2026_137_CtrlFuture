@@ -122,17 +122,19 @@
 >   捕获需求由 ADR-027 覆盖并真机 MEASURED。
 > - **029 PARTIAL**：ADR-029 ADC VREFINT 轮询真机 MEASURED、ADC2
 >   scan/AWD 已实现；ADC DMA 路径在 DEV boot 下写 SRAM 被 RISAF 拦截。
->   **更正（2026-07-31）**：根因不是「固件无权配 RISAF」，而是驱动从未在
->   区域侧给 DMA 缓冲划专属 region 并授权其 CID。M55=TDCID 可在 NuttX 早期
->   `__start` 编程 RISAF 解锁——属独立小专题，非必须 FSBL。详见
->   ADR-039「RISAF 可写性真机探针」。
+>   **更正（2026-07-31，决定性）**：DEV boot 下 NuttX 无法解锁 ADC-DMA→SRAM。
+>   `dma2d_unlock` 带寄存器回读真机实测证明：即使建 region 授权 DMA CID
+>   （region+RIMC 均确认生效），DMA 写 SRAM 仍被拦，门在主设备总线身份而非
+>   region 白名单。ADC-DMA 在 DEV boot 保持 PARTIAL（轮询模式已 MEASURED）；
+>   FSBL/secure-world 能否解属未测。详见 ADR-039「决定性更正」节。
 > - **032 PARTIAL**：ADR-032 DMA2D 去风险探针真机 MEASURED——逐 CID 0..7
 >   的 register-to-memory 写入均被 RISAF 防火墙拦截（含 CPU 的 CID 1）。
->   **更正（2026-07-31）**：探针只改了主设备侧 CID（锁①）、缓冲又落在 CPU
->   代码区（RISAF2），从未开区域侧锁②（专属活跃 region 白名单）。ST 文档
->   确认 M55=TDCID 可从 NuttX 早期启动编程 RISAF；把 DMA2D 输出缓冲放进独立
->   AXISRAM region（RISAF21/22）并授权其 CID 即可解锁，**不必 FSBL**。属
->   DEV-boot 独立小专题。详见 ADR-039 内更正记录。
+>   **更正（2026-07-31，决定性）**：曾推测「建专属 region 授权 DMA CID 即可
+>   在 NuttX 早期解锁」，`dma2d_unlock` 真机证伪——region 使能/边界/白名单 +
+>   RIMC CID override 全部回读=写入值，DMA2D 写 SRAM 仍对所有 CID（含 CID1）
+>   被丢。判据：CPU@CID1 通过、DMA2D@CID1 被拦 → 门在主设备身份，非 region
+>   白名单。**DEV boot 下 NuttX 无解，032 保持 PARTIAL**；FSBL 能否解属未测。
+>   详见 ADR-039「决定性更正」节。
 > - **031/033 PARTIAL**：`/dev/fb0`、`/dev/video0` 设备框架已注册，
 >   但 LTDC 寄存器编程与 DCMIPP CMW_CAMERA 调用均未实现；
 >   两者未在任何 defconfig 启用（`CONFIG_VIDEO_FB`/`CONFIG_VIDEO`
@@ -146,10 +148,11 @@
 >   （阶段 1 最小冷启动 → 阶段 2 可选确认 flash-boot 下 RISAF region 未被
 >   GLOCK 冻结）。可逆、不烧熔丝、有 DFU 砖机安全网。**当前仅固化路线，待
 >   DEV boot 下可做的 ADR 清完后启动。**
->   **范围更正（2026-07-31）**：RISAF 解锁 DMA/NPU→SRAM 已从本 ADR 剥离——
->   `risaf_probe` 真机 + ST RIF 文档证明 M55=TDCID 可从 NuttX 早期 `__start`
->   编程 RISAF，029/032/036 由独立 DEV-boot 小专题解锁，**不依赖 flash-boot/
->   FSBL**。
+>   **范围更正（2026-07-31，决定性）**：RISAF 解锁 DMA/NPU→SRAM 与本 ADR
+>   无关——但更重要的是，`dma2d_unlock` 带回读真机实测已排除**任何 NuttX 侧
+>   （region+RIMC）解锁方案**：门在主设备总线身份，非固件可配。029/032/036
+>   在 DEV boot 保持 PARTIAL，无 NuttX 解法；FSBL/secure-world 能否解属未测，
+>   不作承诺。详见 ADR-039「决定性更正」节。
 
 ---
 
@@ -190,12 +193,12 @@ P0                          P1                          P2          P3
             XSPI Boot                                  024 FDCAN
               │
               ├──────── 039 Flash 冷启动 (FSBL + XSPI) ← 018,019
-              │           (掉电持久独立上电启动；不含 RISAF 解锁)
+              │           (掉电持久独立上电启动；与 RISAF 解锁无关)
               │
-              │   [独立小专题] RISAF 早期编程 (NuttX __start, 非 FSBL)
-              │     └─→ 解锁 029 ADC-DMA / 032 DMA2D / 036 NPU
-              │         (给 DMA 缓冲划专属 AXISRAM region + 授权其 CID;
-              │          M55=TDCID 可在 DEV boot 直接配, 已 risaf_probe 实测)
+              │   029 ADC-DMA / 032 DMA2D / 036 NPU 写 SRAM: DEV boot 下
+              │     NuttX 无解 (dma2d_unlock 回读实测: region+RIMC 均生效,
+              │     DMA@CID1 仍被拦 → 门在主设备总线身份, 非 region 白名单)
+              │     → 三者保持 PARTIAL; FSBL/secure-world 能否解属未测
               │
               └───────── 038 Secure Boot ← 037 Crypto
 
