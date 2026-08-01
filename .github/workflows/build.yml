@@ -135,7 +135,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [nsh, nsh-qemu]
+        target: [nsh, nsh-qemu, edgesight]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
