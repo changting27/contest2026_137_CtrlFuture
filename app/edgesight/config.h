@@ -69,7 +69,7 @@ struct record_config_s
 
 /* Network parameters */
 
-struct network_config_s
+struct network_settings_s
 {
   char     mqtt_broker[48];       /* default "192.168.1.1" */
   uint16_t mqtt_port;             /* default 1883 */
@@ -80,7 +80,7 @@ struct network_config_s
 
 /* Display parameters */
 
-struct display_config_s
+struct display_settings_s
 {
   bool     show_bbox;             /* default true */
   bool     show_skeleton;         /* default true */
@@ -93,10 +93,10 @@ struct display_config_s
 
 struct edgesight_config_s
 {
-  struct fall_config_s    fall;
-  struct record_config_s  record;
-  struct network_config_s network;
-  struct display_config_s display;
+  struct fall_config_s      fall;
+  struct record_config_s    record;
+  struct network_settings_s network;
+  struct display_settings_s display;
   uint8_t  log_level;             /* EVENT_LEVEL_xxx */
   bool     auto_record;           /* default true */
   bool     auto_alert;            /* default true */
