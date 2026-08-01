@@ -34,10 +34,19 @@
 #include <string.h>
 #include <stdio.h>
 #include <syslog.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/ioctl.h>
+#include <sys/videoio.h>
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-#  include "stm32n6_dcmipp.h"
-#endif
+/* Camera capture device node registered by the arch-level DCMIPP
+ * imgdata backend + sensor.  The application talks to the driver
+ * through the standard V4L2 interface only, never through chip
+ * private headers.
+ */
+
+#define CAMERA_HAL_DEVPATH "/dev/video0"
 
 /****************************************************************************
  * Private Data
@@ -54,31 +63,87 @@ int camera_hal_init(struct camera_context_s *ctx, uint32_t fps)
 {
   memset(ctx, 0, sizeof(*ctx));
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-  /* Initialize DCMIPP via arch-level driver
-   * Display pipe: 800x480 RGB565 continuous
-   * NN pipe: 480x480 RGB888 snapshot
-   */
-
-  int ret = stm32n6_dcmipp_init(800, 480, fps);
-  if (ret < 0)
-    {
-      syslog(LOG_ERR, "camera: DCMIPP init failed: %d\n", ret);
-      return ret;
-    }
-
   ctx->sensor_width = 2592;   /* IMX335 default */
   ctx->sensor_height = 1944;
-#else
-  ctx->sensor_width = 2592;
-  ctx->sensor_height = 1944;
-#endif
-
   ctx->fps = fps;
+
+  /* Open the V4L2 capture device exposed by the DCMIPP driver.
+   * A missing node is non-fatal: the HAL stays usable on hosts and
+   * on boards where the camera pipeline is not wired yet.
+   */
+
+  ctx->fd = open(CAMERA_HAL_DEVPATH, O_RDWR);
+  if (ctx->fd < 0)
+    {
+      syslog(LOG_WARNING, "camera: %s unavailable (%d), "
+             "running headless\n", CAMERA_HAL_DEVPATH, errno);
+    }
+
   ctx->initialized = true;
 
   syslog(LOG_INFO, "camera: initialized @ %lu fps\n",
          (unsigned long)fps);
+  return 0;
+}
+
+/****************************************************************************
+ * Name: camera_hal_v4l2_pixfmt
+ *
+ * Description:
+ *   Map a CAM_FMT_xxx value to a V4L2 fourcc pixel format.
+ *
+ ****************************************************************************/
+
+static uint32_t camera_hal_v4l2_pixfmt(uint8_t fmt)
+{
+  switch (fmt)
+    {
+      case CAM_FMT_RGB565:
+        return V4L2_PIX_FMT_RGB565;
+      case CAM_FMT_RGB888:
+        return V4L2_PIX_FMT_RGB24;
+      case CAM_FMT_YUV422:
+        return V4L2_PIX_FMT_UYVY;
+      case CAM_FMT_YUV420:
+        return V4L2_PIX_FMT_YUV420;
+      default:
+        return V4L2_PIX_FMT_RGB565;
+    }
+}
+
+/****************************************************************************
+ * Name: camera_hal_set_format
+ *
+ * Description:
+ *   Apply a pipe configuration through VIDIOC_S_FMT when a device is
+ *   present.  A missing device (fd < 0) is treated as success so the
+ *   HAL degrades gracefully off-target.
+ *
+ ****************************************************************************/
+
+static int camera_hal_set_format(struct camera_context_s *ctx,
+                                  const struct camera_pipe_config_s *cfg)
+{
+  struct v4l2_format fmt;
+
+  if (ctx->fd < 0)
+    {
+      return 0;
+    }
+
+  memset(&fmt, 0, sizeof(fmt));
+  fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  fmt.fmt.pix.width       = cfg->width;
+  fmt.fmt.pix.height      = cfg->height;
+  fmt.fmt.pix.pixelformat = camera_hal_v4l2_pixfmt(cfg->format);
+  fmt.fmt.pix.field       = V4L2_FIELD_ANY;
+
+  if (ioctl(ctx->fd, VIDIOC_S_FMT, (unsigned long)&fmt) < 0)
+    {
+      syslog(LOG_ERR, "camera: VIDIOC_S_FMT failed: %d\n", errno);
+      return -errno;
+    }
+
   return 0;
 }
 
@@ -92,18 +157,11 @@ int camera_hal_config_display(struct camera_context_s *ctx,
 
   ctx->display_pipe = *cfg;
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-  /* Display pipe config is handled by stm32n6_dcmipp_init
-   * (800x480 RGB565 continuous)
-   */
-
-  syslog(LOG_INFO, "camera: display pipe %lux%lu %s\n",
+  syslog(LOG_INFO, "camera: display pipe %lux%lu fmt=%u\n",
          (unsigned long)cfg->width,
-         (unsigned long)cfg->height,
-         cfg->format == CAM_FMT_RGB565 ? "RGB565" : "other");
-#endif
+         (unsigned long)cfg->height, cfg->format);
 
-  return 0;
+  return camera_hal_set_format(ctx, cfg);
 }
 
 int camera_hal_config_nn(struct camera_context_s *ctx,
@@ -116,40 +174,35 @@ int camera_hal_config_nn(struct camera_context_s *ctx,
 
   ctx->nn_pipe = *cfg;
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-  /* NN pipe config is handled by stm32n6_dcmipp_init
-   * (480x480 RGB888 snapshot)
-   */
-
-  syslog(LOG_INFO, "camera: NN pipe %lux%lu %s\n",
+  syslog(LOG_INFO, "camera: NN pipe %lux%lu fmt=%u\n",
          (unsigned long)cfg->width,
-         (unsigned long)cfg->height,
-         cfg->format == CAM_FMT_RGB888 ? "RGB888" : "other");
-#endif
+         (unsigned long)cfg->height, cfg->format);
 
-  return 0;
+  return camera_hal_set_format(ctx, cfg);
 }
 
 int camera_hal_start(struct camera_context_s *ctx, int pipe,
                      void *buffer, int mode)
 {
+  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
   if (!ctx->initialized)
     {
       return -1;
     }
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-  uint32_t dcmipp_mode = (mode == CAM_MODE_CONTINUOUS) ?
-                          DCMIPP_MODE_CONTINUOUS :
-                          DCMIPP_MODE_SNAPSHOT;
-  int ret = stm32n6_dcmipp_start(pipe, buffer, dcmipp_mode);
-  if (ret < 0)
+  UNUSED(buffer);
+
+  if (ctx->fd >= 0)
     {
-      syslog(LOG_ERR, "camera: pipe %d start failed: %d\n",
-             pipe, ret);
-      return ret;
+      if (ioctl(ctx->fd, VIDIOC_STREAMON,
+                (unsigned long)&type) < 0)
+        {
+          syslog(LOG_ERR, "camera: pipe %d STREAMON failed: %d\n",
+                 pipe, errno);
+          return -errno;
+        }
     }
-#endif
 
   syslog(LOG_INFO, "camera: pipe %d started (%s)\n",
          pipe,
@@ -159,20 +212,23 @@ int camera_hal_start(struct camera_context_s *ctx, int pipe,
 
 int camera_hal_stop(struct camera_context_s *ctx, int pipe)
 {
+  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
   if (!ctx->initialized)
     {
       return -1;
     }
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-  int ret = stm32n6_dcmipp_stop(pipe);
-  if (ret < 0)
+  if (ctx->fd >= 0)
     {
-      syslog(LOG_ERR, "camera: pipe %d stop failed: %d\n",
-             pipe, ret);
-      return ret;
+      if (ioctl(ctx->fd, VIDIOC_STREAMOFF,
+                (unsigned long)&type) < 0)
+        {
+          syslog(LOG_ERR, "camera: pipe %d STREAMOFF failed: %d\n",
+                 pipe, errno);
+          return -errno;
+        }
     }
-#endif
 
   syslog(LOG_INFO, "camera: pipe %d stopped\n", pipe);
   return 0;
@@ -185,11 +241,9 @@ void camera_hal_isp_update(struct camera_context_s *ctx)
       return;
     }
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-  /* Run ISP auto-exposure / auto-white-balance */
-
-  stm32n6_dcmipp_isp_update();
-#endif
+  /* ISP auto-exposure / auto-white-balance runs inside the driver;
+   * nothing to drive from user space through the V4L2 interface.
+   */
 }
 
 int camera_hal_set_callback(struct camera_context_s *ctx, int pipe,
@@ -207,18 +261,20 @@ int camera_hal_set_callback(struct camera_context_s *ctx, int pipe,
 
 void camera_hal_deinit(struct camera_context_s *ctx)
 {
+  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
   if (!ctx->initialized)
     {
       return;
     }
 
-#ifdef CONFIG_ARCH_CHIP_STM32N6
-  /* Stop both pipes */
-
-  stm32n6_dcmipp_stop(0);
-  stm32n6_dcmipp_stop(1);
-#endif
+  if (ctx->fd >= 0)
+    {
+      ioctl(ctx->fd, VIDIOC_STREAMOFF, (unsigned long)&type);
+      close(ctx->fd);
+    }
 
   memset(ctx, 0, sizeof(*ctx));
+  ctx->fd = -1;
   syslog(LOG_INFO, "camera: deinitialized\n");
 }

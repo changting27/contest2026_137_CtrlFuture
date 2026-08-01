@@ -69,6 +69,7 @@ struct camera_pipe_config_s
 struct camera_context_s
 {
   bool initialized;
+  int  fd;                 /* /dev/video0 handle, -1 if unavailable */
   uint32_t sensor_width;   /* Native sensor width */
   uint32_t sensor_height;  /* Native sensor height */
   uint32_t fps;
