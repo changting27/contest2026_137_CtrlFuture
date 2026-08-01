@@ -6,5 +6,5 @@
 ############################################################################
 
 ifneq ($(CONFIG_APP_EDGESIGHT),)
-CONFIGURED_APPS += $(APPDIR)/edgesight
+CONFIGURED_APPS += $(APPDIR)/packages/demos/contest2026_137_edgesight
 endif
