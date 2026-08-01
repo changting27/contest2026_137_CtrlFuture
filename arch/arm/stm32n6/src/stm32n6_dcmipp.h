@@ -43,54 +43,49 @@
  * Public Function Prototypes
  ****************************************************************************/
 
-/**
- * @brief Initialize DCMIPP camera subsystem
- * @param width Display pipe width
- * @param height Display pipe height
- * @param fps Target frame rate
- * @return OK on success
- */
+/****************************************************************************
+ * Name: stm32n6_dcmipp_register
+ *
+ * Description:
+ *   Register the DCMIPP capture engine as the V4L2 image data (imgdata)
+ *   backend.  The video framework binds this backend together with a
+ *   registered image sensor when capture_register() creates /dev/videoN.
+ *
+ * Returned Value:
+ *   OK on success; a negated errno value on failure.
+ *
+ ****************************************************************************/
 
-int stm32n6_dcmipp_init(uint32_t width, uint32_t height,
-                          uint32_t fps);
+int stm32n6_dcmipp_register(void);
 
-/**
- * @brief Start camera capture on specified pipe
- * @param pipe 0=display, 1=NN
- * @param buffer Destination buffer
- * @param mode DCMIPP_MODE_CONTINUOUS or DCMIPP_MODE_SNAPSHOT
- * @return OK on success
- */
+/****************************************************************************
+ * Name: stm32n6_dcmipp_sensor_register
+ *
+ * Description:
+ *   Register the board camera as the V4L2 image sensor (imgsensor)
+ *   backend.  Must be called before capture_register() so the video
+ *   framework can bind a sensor to the DCMIPP imgdata backend.
+ *
+ * Returned Value:
+ *   OK on success; a negated errno value on failure.
+ *
+ ****************************************************************************/
 
-int stm32n6_dcmipp_start(uint32_t pipe, void *buffer,
-                           uint32_t mode);
+int stm32n6_dcmipp_sensor_register(void);
 
-/**
- * @brief Stop camera capture on specified pipe
- * @param pipe 0=display, 1=NN
- * @return OK on success
- */
-
-int stm32n6_dcmipp_stop(uint32_t pipe);
-
-/**
- * @brief Run ISP auto-exposure/auto-white-balance update
- */
-
-void stm32n6_dcmipp_isp_update(void);
-
-/**
- * @brief Get frame count for specified pipe
- * @param pipe 0=display, 1=NN
- * @return Frame count
- */
-
-uint32_t stm32n6_dcmipp_get_frame_count(uint32_t pipe);
-
-/**
- * @brief Called from DCMIPP ISR when a frame is received
- * @param pipe 0=display, 1=NN
- */
+/****************************************************************************
+ * Name: stm32n6_dcmipp_frame_event
+ *
+ * Description:
+ *   Notify the imgdata backend that a capture DMA transfer has completed.
+ *   Intended to be called from the DCMIPP frame interrupt handler.  The
+ *   stored video-framework capture callback is invoked so the frame is
+ *   handed back to the V4L2 core.
+ *
+ * Input Parameters:
+ *   pipe - Hardware pipe index that produced the frame.
+ *
+ ****************************************************************************/
 
 void stm32n6_dcmipp_frame_event(uint32_t pipe);
 

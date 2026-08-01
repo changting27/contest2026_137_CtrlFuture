@@ -20,12 +20,19 @@
  *
  * STM32N6 DCMIPP (Digital Camera Interface Pixel Pipeline) driver.
  *
- * Wraps ST CMW_CAMERA middleware for NuttX video framework.
- * Supports dual-pipe architecture:
- *   PIPE1: Display output (RGB565, continuous)
- *   PIPE2: NN inference input (RGB888, snapshot)
+ * This is the V4L2 image data (imgdata) backend for the DCMIPP capture
+ * engine.  It plugs into the NuttX video framework (drivers/video/
+ * v4l2_cap.c): the framework owns /dev/videoN and every VIDIOC_* ioctl,
+ * while this backend only programs the capture hardware and hands each
+ * completed frame back through the stored capture callback.  A separate
+ * image sensor backend (stm32n6_dcmipp_sensor.c) supplies the sensor
+ * half that the framework binds against.
  *
- * Reference: STM32N6 Getting Started ObjectDetection
+ * The register-level pipe/ISP/DMA programming is marked TODO(RM): it
+ * needs the STM32N6 reference-manual offsets (or the ST CMW_CAMERA
+ * middleware), which are not yet available in-tree.  The control flow,
+ * framework contract and buffer/callback bookkeeping are complete so the
+ * pipeline can be exercised end-to-end once the register writes land.
  *
  ****************************************************************************/
 
@@ -34,18 +41,21 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
-#include <nuttx/video/video.h>
-#include <nuttx/kmalloc.h>
+#include <nuttx/video/imgdata.h>
 #include <nuttx/irq.h>
 #include <syslog.h>
 #include <string.h>
-#include <assert.h>
+#include <errno.h>
 
 #include "stm32n6_dcmipp.h"
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
+
+/* Hardware pipe indices.  The DCMIPP exposes independent pipes; EdgeSight
+ * uses one for the display feed and one for the NN inference input.
+ */
 
 #define DCMIPP_PIPE_DISPLAY    0
 #define DCMIPP_PIPE_NN         1
@@ -55,331 +65,319 @@
  * Private Types
  ****************************************************************************/
 
-struct stm32n6_dcmipp_dev_s
+/* imgdata backend instance.  struct imgdata_s must be the first member so
+ * the framework's imgdata pointer can be cast to this type.
+ */
+
+struct stm32n6_dcmipp_data_s
 {
-  struct video_dev_s  dev;        /* V4L2 video device (must be first) */
-  volatile bool       pipe_ready[DCMIPP_PIPE_COUNT];
-  volatile uint32_t   frame_count[DCMIPP_PIPE_COUNT];
-  sem_t               locksem;    /* Device lock */
-  uint32_t            width;      /* Display width */
-  uint32_t            height;     /* Display height */
-  uint32_t            nn_width;   /* NN pipe width */
-  uint32_t            nn_height;  /* NN pipe height */
-  uint32_t            fps;
+  struct imgdata_s      data;         /* Base imgdata (must be first) */
+  imgdata_capture_t     capture_cb;   /* Frame-complete callback */
+  FAR void             *capture_arg;  /* Callback argument */
+  FAR uint8_t          *buf_addr;     /* Current capture buffer */
+  uint32_t              buf_size;     /* Capture buffer size in bytes */
+  uint16_t              width;        /* Configured frame width */
+  uint16_t              height;       /* Configured frame height */
+  uint32_t              pixelformat;  /* IMGDATA_PIX_FMT_* */
+  volatile bool         streaming;    /* Capture active */
+  volatile uint32_t     frame_count;  /* Frames delivered */
 };
+
+/****************************************************************************
+ * Private Function Prototypes
+ ****************************************************************************/
+
+static int stm32n6_dcmipp_data_init(FAR struct imgdata_s *data);
+static int stm32n6_dcmipp_data_uninit(FAR struct imgdata_s *data);
+static int stm32n6_dcmipp_data_set_buf(FAR struct imgdata_s *data,
+                                       uint8_t nr_datafmts,
+                                       FAR imgdata_format_t *datafmts,
+                                       FAR uint8_t *addr, uint32_t size);
+static int stm32n6_dcmipp_data_validate_frame_setting(
+                                    FAR struct imgdata_s *data,
+                                    uint8_t nr_datafmts,
+                                    FAR imgdata_format_t *datafmts,
+                                    FAR imgdata_interval_t *interval);
+static int stm32n6_dcmipp_data_start_capture(FAR struct imgdata_s *data,
+                                    uint8_t nr_datafmts,
+                                    FAR imgdata_format_t *datafmts,
+                                    FAR imgdata_interval_t *interval,
+                                    FAR imgdata_capture_t callback,
+                                    FAR void *arg);
+static int stm32n6_dcmipp_data_stop_capture(FAR struct imgdata_s *data);
 
 /****************************************************************************
  * Private Data
  ****************************************************************************/
 
-static struct stm32n6_dcmipp_dev_s *g_dcmipp_dev;
+static const struct imgdata_ops_s g_stm32n6_dcmipp_ops =
+{
+  .init                   = stm32n6_dcmipp_data_init,
+  .uninit                 = stm32n6_dcmipp_data_uninit,
+  .set_buf                = stm32n6_dcmipp_data_set_buf,
+  .validate_frame_setting = stm32n6_dcmipp_data_validate_frame_setting,
+  .start_capture          = stm32n6_dcmipp_data_start_capture,
+  .stop_capture           = stm32n6_dcmipp_data_stop_capture,
+};
+
+static struct stm32n6_dcmipp_data_s g_stm32n6_dcmipp =
+{
+  .data = { &g_stm32n6_dcmipp_ops },
+};
 
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
 
-static int dcmipp_open(struct file *filep)
+/****************************************************************************
+ * Name: stm32n6_dcmipp_fmt_supported
+ *
+ * Description:
+ *   Return true when the pixel format can be produced by a DCMIPP pipe.
+ *
+ ****************************************************************************/
+
+static bool stm32n6_dcmipp_fmt_supported(uint32_t pixelformat)
 {
-  struct inode *inode = filep->f_inode;
-  struct stm32n6_dcmipp_dev_s *priv = inode->i_private;
-
-  nxsem_wait(&priv->locksem);
-
-  syslog(LOG_INFO, "dcmipp: opened\n");
-
-  nxsem_post(&priv->locksem);
-  return OK;
-}
-
-static int dcmipp_close(struct file *filep)
-{
-  struct inode *inode = filep->f_inode;
-  struct stm32n6_dcmipp_dev_s *priv = inode->i_private;
-
-  nxsem_wait(&priv->locksem);
-
-  syslog(LOG_INFO, "dcmipp: closed\n");
-
-  nxsem_post(&priv->locksem);
-  return OK;
-}
-
-static ssize_t dcmipp_read(struct file *filep, char *buffer,
-                            size_t buflen)
-{
-  /* Not used for camera device */
-
-  return -ENOSYS;
-}
-
-static ssize_t dcmipp_write(struct file *filep,
-                             const char *buffer, size_t buflen)
-{
-  /* Not used for camera device */
-
-  return -ENOSYS;
-}
-
-static int dcmipp_ioctl(struct file *filep, int cmd,
-                         unsigned long arg)
-{
-  struct inode *inode = filep->f_inode;
-  struct stm32n6_dcmipp_dev_s *priv = inode->i_private;
-  int ret = OK;
-
-  nxsem_wait(&priv->locksem);
-
-  switch (cmd)
+  switch (pixelformat)
     {
-      case VIDIOC_QUERYCAP:
-        {
-          struct v4l2_capability *cap =
-            (struct v4l2_capability *)(uintptr_t)arg;
-          memset(cap, 0, sizeof(*cap));
-          strlcpy((char *)cap->driver, "stm32n6-dcmipp",
-                  sizeof(cap->driver));
-          strlcpy((char *)cap->card, "STM32N6 Camera",
-                  sizeof(cap->card));
-          cap->device_caps = V4L2_CAP_VIDEO_CAPTURE |
-                             V4L2_CAP_STREAMING;
-          break;
-        }
-
-      case VIDIOC_G_FMT:
-        {
-          struct v4l2_format *fmt =
-            (struct v4l2_format *)(uintptr_t)arg;
-          fmt->fmt.pix.width = priv->width;
-          fmt->fmt.pix.height = priv->height;
-          fmt->fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
-          fmt->fmt.pix.sizeimage =
-            priv->width * priv->height * 2;
-          break;
-        }
-
-      case VIDIOC_S_FMT:
-        {
-          struct v4l2_format *fmt =
-            (struct v4l2_format *)(uintptr_t)arg;
-          priv->width = fmt->fmt.pix.width;
-          priv->height = fmt->fmt.pix.height;
-          syslog(LOG_INFO, "dcmipp: set format %lux%lu\n",
-                 (unsigned long)priv->width,
-                 (unsigned long)priv->height);
-          break;
-        }
-
-      case VIDIOC_REQBUFS:
-        {
-          /* Stub: accept buffer request */
-
-          break;
-        }
-
+      case IMGDATA_PIX_FMT_RGB565:
+      case IMGDATA_PIX_FMT_UYVY:
+      case IMGDATA_PIX_FMT_YUYV:
+        return true;
       default:
-        ret = -ENOTTY;
-        break;
+        return false;
+    }
+}
+
+/****************************************************************************
+ * Name: stm32n6_dcmipp_data_init
+ *
+ * Description:
+ *   Bring the DCMIPP capture engine out of reset and enable its clocks.
+ *
+ ****************************************************************************/
+
+static int stm32n6_dcmipp_data_init(FAR struct imgdata_s *data)
+{
+  FAR struct stm32n6_dcmipp_data_s *priv =
+    (FAR struct stm32n6_dcmipp_data_s *)data;
+
+  priv->streaming   = false;
+  priv->frame_count = 0;
+  priv->capture_cb  = NULL;
+  priv->capture_arg = NULL;
+
+  /* TODO(RM): enable DCMIPP clock in RCC, deassert reset, configure the
+   * parallel/CSI input interface and the pipe muxing registers.
+   */
+
+  syslog(LOG_INFO, "dcmipp: imgdata backend initialized\n");
+  return OK;
+}
+
+/****************************************************************************
+ * Name: stm32n6_dcmipp_data_uninit
+ *
+ * Description:
+ *   Stop any active capture and gate the DCMIPP clocks.
+ *
+ ****************************************************************************/
+
+static int stm32n6_dcmipp_data_uninit(FAR struct imgdata_s *data)
+{
+  FAR struct stm32n6_dcmipp_data_s *priv =
+    (FAR struct stm32n6_dcmipp_data_s *)data;
+
+  priv->streaming = false;
+
+  /* TODO(RM): disable pipe capture, mask interrupts, gate DCMIPP clock. */
+
+  return OK;
+}
+
+/****************************************************************************
+ * Name: stm32n6_dcmipp_data_set_buf
+ *
+ * Description:
+ *   Program the destination address of the next capture DMA transfer.
+ *   Called by the framework each time a buffer is queued.
+ *
+ ****************************************************************************/
+
+static int stm32n6_dcmipp_data_set_buf(FAR struct imgdata_s *data,
+                                       uint8_t nr_datafmts,
+                                       FAR imgdata_format_t *datafmts,
+                                       FAR uint8_t *addr, uint32_t size)
+{
+  FAR struct stm32n6_dcmipp_data_s *priv =
+    (FAR struct stm32n6_dcmipp_data_s *)data;
+
+  if (addr == NULL || size == 0)
+    {
+      return -EINVAL;
     }
 
-  nxsem_post(&priv->locksem);
-  return ret;
+  UNUSED(nr_datafmts);
+  UNUSED(datafmts);
+
+  priv->buf_addr = addr;
+  priv->buf_size = size;
+
+  /* TODO(RM): write addr to the pipe's DMA destination register
+   * (DCMIPP_PxPPM0AR1) so the next frame lands in this buffer.
+   */
+
+  return OK;
 }
 
-static const struct file_operations g_dcmipp_ops =
+/****************************************************************************
+ * Name: stm32n6_dcmipp_data_validate_frame_setting
+ *
+ * Description:
+ *   Report whether the requested frame geometry / format / rate can be
+ *   produced.  Called before start_capture during VIDIOC_S_FMT handling.
+ *
+ ****************************************************************************/
+
+static int stm32n6_dcmipp_data_validate_frame_setting(
+                                    FAR struct imgdata_s *data,
+                                    uint8_t nr_datafmts,
+                                    FAR imgdata_format_t *datafmts,
+                                    FAR imgdata_interval_t *interval)
 {
-  .open  = dcmipp_open,
-  .close = dcmipp_close,
-  .read  = dcmipp_read,
-  .write = dcmipp_write,
-  .ioctl = dcmipp_ioctl,
-};
+  UNUSED(data);
+  UNUSED(interval);
+
+  if (nr_datafmts < 1 || datafmts == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (datafmts[IMGDATA_FMT_MAIN].width == 0 ||
+      datafmts[IMGDATA_FMT_MAIN].height == 0)
+    {
+      return -EINVAL;
+    }
+
+  if (!stm32n6_dcmipp_fmt_supported(
+        datafmts[IMGDATA_FMT_MAIN].pixelformat))
+    {
+      return -EINVAL;
+    }
+
+  return OK;
+}
+
+/****************************************************************************
+ * Name: stm32n6_dcmipp_data_start_capture
+ *
+ * Description:
+ *   Latch the frame settings and the framework capture callback, then
+ *   start the pipe.  The callback is invoked from the frame interrupt
+ *   (stm32n6_dcmipp_frame_event) once a transfer completes.
+ *
+ ****************************************************************************/
+
+static int stm32n6_dcmipp_data_start_capture(FAR struct imgdata_s *data,
+                                    uint8_t nr_datafmts,
+                                    FAR imgdata_format_t *datafmts,
+                                    FAR imgdata_interval_t *interval,
+                                    FAR imgdata_capture_t callback,
+                                    FAR void *arg)
+{
+  FAR struct stm32n6_dcmipp_data_s *priv =
+    (FAR struct stm32n6_dcmipp_data_s *)data;
+
+  if (nr_datafmts < 1 || datafmts == NULL)
+    {
+      return -EINVAL;
+    }
+
+  UNUSED(interval);
+
+  priv->width       = datafmts[IMGDATA_FMT_MAIN].width;
+  priv->height      = datafmts[IMGDATA_FMT_MAIN].height;
+  priv->pixelformat = datafmts[IMGDATA_FMT_MAIN].pixelformat;
+  priv->capture_cb  = callback;
+  priv->capture_arg = arg;
+  priv->streaming   = true;
+
+  /* TODO(RM): configure pipe pixel format / crop / downsize registers
+   * for width x height, enable the frame-complete interrupt and set the
+   * pipe capture-enable bit (DCMIPP_PxFCTCR / DCMIPP_CMCR).
+   */
+
+  syslog(LOG_INFO, "dcmipp: capture start %ux%u fmt=%lu\n",
+         priv->width, priv->height,
+         (unsigned long)priv->pixelformat);
+  return OK;
+}
+
+/****************************************************************************
+ * Name: stm32n6_dcmipp_data_stop_capture
+ *
+ * Description:
+ *   Stop the pipe and clear the capture callback.
+ *
+ ****************************************************************************/
+
+static int stm32n6_dcmipp_data_stop_capture(FAR struct imgdata_s *data)
+{
+  FAR struct stm32n6_dcmipp_data_s *priv =
+    (FAR struct stm32n6_dcmipp_data_s *)data;
+
+  priv->streaming   = false;
+  priv->capture_cb  = NULL;
+  priv->capture_arg = NULL;
+
+  /* TODO(RM): clear the pipe capture-enable bit and mask its interrupt. */
+
+  syslog(LOG_INFO, "dcmipp: capture stopped\n");
+  return OK;
+}
 
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
 
 /****************************************************************************
- * Name: stm32n6_dcmipp_init
- *
- * Description:
- *   Initialize DCMIPP camera subsystem.
- *   Registers /dev/video0 character device.
- *
- * Input Parameters:
- *   width  - Display pipe width (e.g. 800)
- *   height - Display pipe height (e.g. 480)
- *   fps    - Target frame rate
- *
- * Returned Value:
- *   OK on success, negated errno on failure.
- *
+ * Name: stm32n6_dcmipp_register
  ****************************************************************************/
 
-int stm32n6_dcmipp_init(uint32_t width, uint32_t height,
-                          uint32_t fps)
+int stm32n6_dcmipp_register(void)
 {
-  struct stm32n6_dcmipp_dev_s *priv;
-  int ret;
-
-  /* Allocate device structure */
-
-  priv = kmm_zalloc(sizeof(struct stm32n6_dcmipp_dev_s));
-  if (priv == NULL)
-    {
-      syslog(LOG_ERR, "dcmipp: out of memory\n");
-      return -ENOMEM;
-    }
-
-  priv->width = width;
-  priv->height = height;
-  priv->nn_width = 480;   /* YOLO input size */
-  priv->nn_height = 480;
-  priv->fps = fps;
-
-  nxsem_init(&priv->locksem, 0, 1);
-
-  /* Register character device */
-
-  ret = register_driver("/dev/video0", &g_dcmipp_ops,
-                        0666, priv);
-  if (ret < 0)
-    {
-      syslog(LOG_ERR, "dcmipp: register failed: %d\n", ret);
-      nxsem_destroy(&priv->locksem);
-      kmm_free(priv);
-      return ret;
-    }
-
-  g_dcmipp_dev = priv;
-
-  syslog(LOG_INFO, "dcmipp: registered /dev/video0 "
-         "(display=%lux%lu nn=%lux%lu %lu fps)\n",
-         (unsigned long)width, (unsigned long)height,
-         (unsigned long)priv->nn_width,
-         (unsigned long)priv->nn_height,
-         (unsigned long)fps);
-
+  imgdata_register(&g_stm32n6_dcmipp.data);
+  syslog(LOG_INFO, "dcmipp: registered imgdata backend\n");
   return OK;
-}
-
-/****************************************************************************
- * Name: stm32n6_dcmipp_start
- *
- * Description:
- *   Start camera capture on specified pipe.
- *   Integrates with ST CMW_CAMERA middleware.
- *
- ****************************************************************************/
-
-int stm32n6_dcmipp_start(uint32_t pipe, void *buffer,
-                           uint32_t mode)
-{
-  struct stm32n6_dcmipp_dev_s *priv = g_dcmipp_dev;
-
-  if (priv == NULL)
-    {
-      return -ENODEV;
-    }
-
-  if (pipe >= DCMIPP_PIPE_COUNT)
-    {
-      return -EINVAL;
-    }
-
-  /* Delegate to ST middleware */
-
-  /* ret = CMW_CAMERA_Start(pipe, buffer, mode); */
-
-  priv->pipe_ready[pipe] = true;
-  priv->frame_count[pipe] = 0;
-
-  syslog(LOG_INFO, "dcmipp: pipe %lu started (%s)\n",
-         (unsigned long)pipe,
-         mode == 0 ? "continuous" : "snapshot");
-
-  return OK;
-}
-
-/****************************************************************************
- * Name: stm32n6_dcmipp_stop
- *
- * Description:
- *   Stop camera capture on specified pipe.
- *
- ****************************************************************************/
-
-int stm32n6_dcmipp_stop(uint32_t pipe)
-{
-  struct stm32n6_dcmipp_dev_s *priv = g_dcmipp_dev;
-
-  if (priv == NULL)
-    {
-      return -ENODEV;
-    }
-
-  if (pipe >= DCMIPP_PIPE_COUNT)
-    {
-      return -EINVAL;
-    }
-
-  /* ret = CMW_CAMERA_Suspend(pipe); */
-
-  priv->pipe_ready[pipe] = false;
-
-  syslog(LOG_INFO, "dcmipp: pipe %lu stopped\n",
-         (unsigned long)pipe);
-
-  return OK;
-}
-
-/****************************************************************************
- * Name: stm32n6_dcmipp_isp_update
- *
- * Description:
- *   Run ISP auto-exposure / auto-white-balance update.
- *   Should be called periodically (e.g. every frame).
- *
- ****************************************************************************/
-
-void stm32n6_dcmipp_isp_update(void)
-{
-  /* ret = CMW_CAMERA_Run(); */
-}
-
-/****************************************************************************
- * Name: stm32n6_dcmipp_get_frame_count
- *
- * Description:
- *   Get frame count for specified pipe.
- *
- ****************************************************************************/
-
-uint32_t stm32n6_dcmipp_get_frame_count(uint32_t pipe)
-{
-  struct stm32n6_dcmipp_dev_s *priv = g_dcmipp_dev;
-
-  if (priv == NULL || pipe >= DCMIPP_PIPE_COUNT)
-    {
-      return 0;
-    }
-
-  return priv->frame_count[pipe];
 }
 
 /****************************************************************************
  * Name: stm32n6_dcmipp_frame_event
- *
- * Description:
- *   Called from DCMIPP ISR when a frame is received.
- *
  ****************************************************************************/
 
 void stm32n6_dcmipp_frame_event(uint32_t pipe)
 {
-  struct stm32n6_dcmipp_dev_s *priv = g_dcmipp_dev;
+  FAR struct stm32n6_dcmipp_data_s *priv = &g_stm32n6_dcmipp;
+  imgdata_capture_t cb;
+  FAR void *arg;
 
-  if (priv != NULL && pipe < DCMIPP_PIPE_COUNT)
+  if (pipe >= DCMIPP_PIPE_COUNT || !priv->streaming)
     {
-      priv->frame_count[pipe]++;
+      return;
+    }
+
+  priv->frame_count++;
+
+  /* Hand the completed frame back to the video framework.  result 0
+   * signals a good frame; buf_size is the number of valid bytes.
+   */
+
+  cb  = priv->capture_cb;
+  arg = priv->capture_arg;
+
+  if (cb != NULL)
+    {
+      cb(0, priv->buf_size, NULL, arg);
     }
 }
