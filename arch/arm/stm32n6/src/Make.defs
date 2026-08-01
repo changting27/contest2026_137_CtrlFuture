@@ -27,8 +27,9 @@ CHIP_CSRCS += stm32n6_serial.c stm32n6_irq.c
 CHIP_CSRCS += stm32n6_gpio.c stm32n6_timerisr.c stm32n6_pwr.c
 CHIP_CSRCS += stm32n6_idle.c
 
-ifeq ($(CONFIG_VIDEO),y)
+ifeq ($(CONFIG_VIDEO_STREAM),y)
   CHIP_CSRCS += stm32n6_dcmipp.c
+  CHIP_CSRCS += stm32n6_dcmipp_sensor.c
 endif
 
 ifeq ($(CONFIG_VIDEO_FB),y)

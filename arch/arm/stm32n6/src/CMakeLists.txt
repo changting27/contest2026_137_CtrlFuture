@@ -31,8 +31,9 @@ set(SRCS
     stm32n6_pwr.c
     stm32n6_idle.c)
 
-if(CONFIG_VIDEO)
+if(CONFIG_VIDEO_STREAM)
   list(APPEND SRCS stm32n6_dcmipp.c)
+  list(APPEND SRCS stm32n6_dcmipp_sensor.c)
 endif()
 
 if(CONFIG_VIDEO_FB)

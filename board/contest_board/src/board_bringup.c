@@ -42,6 +42,9 @@
 #  include "stm32n6_dcmipp.h"
 #  include "stm32n6_ltdc.h"
 #  include "stm32n6_rtc.h"
+#  ifdef CONFIG_VIDEO_STREAM
+#    include <nuttx/video/v4l2_cap.h>
+#  endif
 #  ifdef CONFIG_DEV_GPIO
 #    include "stm32n6_gpio.h"
 #  endif
@@ -368,14 +371,21 @@ static int board_bringup(void)
     }
 #  endif
 
-#  ifdef CONFIG_VIDEO
-  /* Initialize DCMIPP camera (800x480 @ 30fps) */
+#  ifdef CONFIG_VIDEO_STREAM
+  /* Register the camera pipeline with the V4L2 framework.  The sensor
+   * (imgsensor) and DCMIPP capture engine (imgdata) register into the
+   * framework globals, then capture_initialize() binds them and creates
+   * /dev/video0.
+   */
 
-  ret = stm32n6_dcmipp_init(800, 480, 30);
+  stm32n6_dcmipp_sensor_register();
+  stm32n6_dcmipp_register();
+
+  ret = capture_initialize("/dev/video0");
   if (ret < 0)
     {
       syslog(LOG_ERR,
-             "ERROR: DCMIPP init failed: %d\n", ret);
+             "ERROR: camera capture register failed: %d\n", ret);
     }
 #  endif
 
