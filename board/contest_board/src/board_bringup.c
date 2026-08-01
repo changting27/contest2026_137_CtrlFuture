@@ -45,6 +45,9 @@
 #  ifdef CONFIG_VIDEO_STREAM
 #    include <nuttx/video/v4l2_cap.h>
 #  endif
+#  ifdef CONFIG_VIDEO_FB
+#    include <nuttx/video/fb.h>
+#  endif
 #  ifdef CONFIG_DEV_GPIO
 #    include "stm32n6_gpio.h"
 #  endif
@@ -390,18 +393,16 @@ static int board_bringup(void)
 #  endif
 
 #  ifdef CONFIG_VIDEO_FB
-  /* Initialize LTDC display (800x480, dual-layer)
-   * Framebuffers allocated from board.h or linker script
+  /* Register the LTDC framebuffer as /dev/fb0.  fb_register() drives the
+   * arch entry points up_fbinitialize()/up_fbgetvplane() implemented in
+   * stm32n6_ltdc.c.
    */
 
-  ret = stm32n6_ltdc_init(800, 480,
-                            (void *)BOARD_LCD_BG_ADDR,
-                            (void *)BOARD_LCD_FG_ADDR0,
-                            (void *)BOARD_LCD_FG_ADDR1);
+  ret = fb_register(0, 0);
   if (ret < 0)
     {
       syslog(LOG_ERR,
-             "ERROR: LTDC init failed: %d\n", ret);
+             "ERROR: LTDC fb_register failed: %d\n", ret);
     }
 #  endif
 #endif
