@@ -102,6 +102,10 @@ struct display_context_s
   void *bg_buffer;       /* Background framebuffer */
   void *fg_buffer[2];    /* Double-buffered foreground */
   int fg_write_idx;      /* Current write buffer index */
+  int fd;                /* /dev/fb0 handle, -1 if unavailable */
+  void *fbmem;           /* Mapped framebuffer memory, NULL if none */
+  uint32_t fbstride;     /* Framebuffer row stride in bytes */
+  uint8_t fbbpp;         /* Framebuffer bits per pixel */
 };
 
 /****************************************************************************
