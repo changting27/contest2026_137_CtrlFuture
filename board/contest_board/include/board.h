@@ -186,6 +186,21 @@
 #define BOARD_LCD_WIDTH      800
 #define BOARD_LCD_HEIGHT     480
 
+/* LCD panel RGB interface timing.  These are the horizontal/vertical
+ * sync, back-porch and front-porch parameters the LTDC driver programs
+ * into LTDC_SSCR/BPCR/AWCR/TWCR.  The values below are the typical
+ * timing for an 800x480 RGB TFT panel (~33 MHz pixel clock, ~60 Hz).
+ * TODO(panel): confirm against the actual panel datasheet once the
+ * display module part number is fixed.
+ */
+
+#define BOARD_LCD_HSYNC      48   /* Horizontal sync width (pixel clks) */
+#define BOARD_LCD_HBP        88   /* Horizontal back porch */
+#define BOARD_LCD_HFP        40   /* Horizontal front porch */
+#define BOARD_LCD_VSYNC      3    /* Vertical sync height (lines) */
+#define BOARD_LCD_VBP        32   /* Vertical back porch */
+#define BOARD_LCD_VFP        13   /* Vertical front porch */
+
 #define BOARD_LCD_BG_ADDR    0x34100000
 #define BOARD_LCD_FG_ADDR0   0x341C0000
 #define BOARD_LCD_FG_ADDR1   0x34280000

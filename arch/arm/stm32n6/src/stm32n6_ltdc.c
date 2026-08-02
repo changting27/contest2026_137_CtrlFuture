@@ -41,12 +41,16 @@
 
 #include <nuttx/config.h>
 #include <nuttx/video/fb.h>
+#include <stdint.h>
 #include <syslog.h>
 #include <string.h>
 #include <errno.h>
 
 #include <arch/board/board.h>
 
+#include "arm_internal.h"
+#include "hardware/stm32_rcc.h"
+#include "hardware/stm32_ltdc.h"
 #include "stm32n6_ltdc.h"
 
 /****************************************************************************
@@ -155,15 +159,80 @@ static int stm32n6_ltdc_getplaneinfo(FAR struct fb_vtable_s *vtable,
 
 int up_fbinitialize(int display)
 {
+  uint32_t regval;
+
+  /* Accumulated timing boundaries (LTDC uses running sums, all -1). */
+
+  const uint32_t hsync = BOARD_LCD_HSYNC;
+  const uint32_t vsync = BOARD_LCD_VSYNC;
+  const uint32_t ahbp  = BOARD_LCD_HSYNC + BOARD_LCD_HBP;
+  const uint32_t avbp  = BOARD_LCD_VSYNC + BOARD_LCD_VBP;
+  const uint32_t aaw   = ahbp + LTDC_WIDTH;
+  const uint32_t aah   = avbp + LTDC_HEIGHT;
+  const uint32_t totalw = aaw + BOARD_LCD_HFP;
+  const uint32_t totalh = aah + BOARD_LCD_VFP;
+
   if (display != 0)
     {
       return -EINVAL;
     }
 
-  /* TODO(RM): enable the LTDC clock in RCC, program the panel timing
-   * (HSYNC/VSYNC/porches), configure layer 0 as a full-screen RGB565
-   * plane pointing at LTDC_FB_ADDR, and enable the controller.
+  /* Enable the LTDC peripheral clock (atomic read-modify-write). */
+
+  modifyreg32(STM32_RCC_APB5ENR, 0, RCC_APB5ENR_LTDCEN);
+
+  /* Program the panel timing (all boundaries are -1 per RM0486). */
+
+  putreg32(LTDC_SSCR_HSW(hsync - 1) | LTDC_SSCR_VSH(vsync - 1),
+           STM32_LTDC_SSCR);
+  putreg32(LTDC_BPCR_AHBP(ahbp - 1) | LTDC_BPCR_AVBP(avbp - 1),
+           STM32_LTDC_BPCR);
+  putreg32(LTDC_AWCR_AAW(aaw - 1) | LTDC_AWCR_AAH(aah - 1),
+           STM32_LTDC_AWCR);
+  putreg32(LTDC_TWCR_TOTALW(totalw - 1) | LTDC_TWCR_TOTALH(totalh - 1),
+           STM32_LTDC_TWCR);
+
+  /* Background color black; default polarities (active low sync). */
+
+  putreg32(0, STM32_LTDC_BCCR);
+
+  /* Configure layer 1 as a full-screen RGB565 plane.
+   *
+   * Window spans the active area; positions are relative to the
+   * accumulated back-porch boundary.
    */
+
+  putreg32(LTDC_LXWHPCR_WHSTPOS(ahbp) | LTDC_LXWHPCR_WHSPPOS(aaw - 1),
+           STM32_LTDC_L1WHPCR);
+  putreg32(LTDC_LXWVPCR_WVSTPOS(avbp) | LTDC_LXWVPCR_WVSPPOS(aah - 1),
+           STM32_LTDC_L1WVPCR);
+
+  putreg32(LTDC_LXPFCR_PF_RGB565, STM32_LTDC_L1PFCR);
+  putreg32(LTDC_LXCACR_CONSTA(0xff), STM32_LTDC_L1CACR);
+  putreg32(LTDC_LXBFCR_BF1_CA | LTDC_LXBFCR_BF2_CA, STM32_LTDC_L1BFCR);
+
+  putreg32(LTDC_FB_ADDR, STM32_LTDC_L1CFBAR);
+
+  /* Frame buffer line length (bytes + 3) and pitch (bytes). */
+
+  putreg32(LTDC_LXCFBLR_CFBLL(LTDC_STRIDE + 3) |
+           LTDC_LXCFBLR_CFBP(LTDC_STRIDE),
+           STM32_LTDC_L1CFBLR);
+  putreg32(LTDC_LXCFBLNR_CFBLNBR(LTDC_HEIGHT), STM32_LTDC_L1CFBLNR);
+
+  /* Enable layer 1. */
+
+  putreg32(LTDC_LXCR_LEN, STM32_LTDC_L1CR);
+
+  /* Enable the controller and force an immediate shadow reload so the
+   * layer configuration takes effect.
+   */
+
+  regval = getreg32(STM32_LTDC_GCR);
+  regval |= LTDC_GCR_LTDCEN;
+  putreg32(regval, STM32_LTDC_GCR);
+
+  putreg32(LTDC_SRCR_IMR, STM32_LTDC_SRCR);
 
   syslog(LOG_INFO, "ltdc: framebuffer %ux%u RGB565 @ %p\n",
          (unsigned)LTDC_WIDTH, (unsigned)LTDC_HEIGHT,
@@ -209,12 +278,23 @@ FAR struct fb_vtable_s *up_fbgetvplane(int display, int vplane)
 
 void up_fbuninitialize(int display)
 {
+  uint32_t regval;
+
   if (display != 0)
     {
       return;
     }
 
-  /* TODO(RM): disable the LTDC layers and controller, and gate the
-   * LTDC clock in RCC.
-   */
+  /* Disable layer 1 and reload, then disable the controller. */
+
+  putreg32(0, STM32_LTDC_L1CR);
+  putreg32(LTDC_SRCR_IMR, STM32_LTDC_SRCR);
+
+  regval = getreg32(STM32_LTDC_GCR);
+  regval &= ~LTDC_GCR_LTDCEN;
+  putreg32(regval, STM32_LTDC_GCR);
+
+  /* Gate the LTDC peripheral clock. */
+
+  modifyreg32(STM32_RCC_APB5ENR, RCC_APB5ENR_LTDCEN, 0);
 }

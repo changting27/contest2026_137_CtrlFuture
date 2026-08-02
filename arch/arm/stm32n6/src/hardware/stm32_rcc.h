@@ -468,6 +468,13 @@
 #define RCC_AHB5ENR_XSPI2EN      (1 << 12)
 #define RCC_AHB5ENR_GPU2DEN      (1 << 20)
 
+/* APB5ENR bits: LTDC/DCMIPP enables (positions per CMSIS stm32n647xx.h
+ * and RM0486 14.10.90 RCC_APB5ENR).
+ */
+
+#define RCC_APB5ENR_LTDCEN       (1 << 1)
+#define RCC_APB5ENR_DCMIPPEN     (1 << 2)
+
 /* APB4ENR1 bits: RTC enable (CMSIS RCC_APB4ENR1_RTCEN, bit 16).
  * IWDG has no software clock-gating enable bit on STM32N6 (neither
  * CMSIS nor upstream NuttX define an RCC_*ENR*_IWDGEN); the watchdog

@@ -151,4 +151,13 @@
 #define STM32_DMA2D_BASE       (STM32_AHB5_BASE + 0x1000)
 #define STM32_GPU2D_BASE       (STM32_AHB5_BASE + 0x14000)
 
+/* APB5 peripherals (display and camera).  RM0486's memory map lists the
+ * Secure aliases at 0x5800_0000 (LTDC) and 0x5800_1000 (DCMIPP); the
+ * Non-Secure aliases used throughout this port are APB5_BASE-relative
+ * (0x4800_0000 / 0x4800_1000).  Their clocks live in RCC_APB5ENR.
+ */
+
+#define STM32_LTDC_BASE        (STM32_APB5_BASE + 0x0000)
+#define STM32_DCMIPP_BASE      (STM32_APB5_BASE + 0x1000)
+
 #endif /* __ARCH_ARM_SRC_STM32N6_HARDWARE_STM32_MEMORYMAP_H */
