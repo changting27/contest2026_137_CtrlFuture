@@ -64,14 +64,14 @@
 
 /* Pipe 0 (dump pipe: input bytes written straight to memory) */
 
-#define STM32_DCMIPP_P0FSCR_OFFSET   0x0404 /* Pipe0 flow selection */
-#define STM32_DCMIPP_P0FCTCR_OFFSET  0x0500 /* Pipe0 flow control */
-#define STM32_DCMIPP_P0PPCR_OFFSET   0x05c0 /* Pipe0 pixel packer config */
+#define STM32_DCMIPP_P0FSCR_OFFSET    0x0404 /* Pipe0 flow selection */
+#define STM32_DCMIPP_P0FCTCR_OFFSET   0x0500 /* Pipe0 flow control */
+#define STM32_DCMIPP_P0PPCR_OFFSET    0x05c0 /* Pipe0 pixel packer config */
 #define STM32_DCMIPP_P0PPM0AR1_OFFSET 0x05c4 /* Pipe0 packer memory0 addr 1 */
 #define STM32_DCMIPP_P0PPM0AR2_OFFSET 0x05c8 /* Pipe0 packer memory0 addr 2 */
-#define STM32_DCMIPP_P0IER_OFFSET    0x05f4 /* Pipe0 interrupt enable */
-#define STM32_DCMIPP_P0SR_OFFSET     0x05f8 /* Pipe0 status */
-#define STM32_DCMIPP_P0FCR_OFFSET    0x05fc /* Pipe0 flag clear */
+#define STM32_DCMIPP_P0IER_OFFSET     0x05f4 /* Pipe0 interrupt enable */
+#define STM32_DCMIPP_P0SR_OFFSET      0x05f8 /* Pipe0 status */
+#define STM32_DCMIPP_P0FCR_OFFSET     0x05fc /* Pipe0 flag clear */
 
 /* Register addresses *******************************************************/
 

@@ -126,7 +126,10 @@ static const struct imgdata_ops_s g_stm32n6_dcmipp_ops =
 
 static struct stm32n6_dcmipp_data_s g_stm32n6_dcmipp =
 {
-  .data = { &g_stm32n6_dcmipp_ops },
+  .data =
+  {
+    &g_stm32n6_dcmipp_ops
+  },
 };
 
 /****************************************************************************

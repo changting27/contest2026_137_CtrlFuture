@@ -168,7 +168,7 @@ int network_hal_init(struct network_context_s *ctx,
 int network_hal_connect(struct network_context_s *ctx)
 {
   FAR struct network_mqtt_s *nm;
-  enum MQTTErrors mqtterr;
+  int mqtterr;
   uint8_t flags;
 
   if (!ctx->initialized)
@@ -234,7 +234,7 @@ int network_hal_send_alert(struct network_context_s *ctx,
                            const struct alert_message_s *alert)
 {
   FAR struct network_mqtt_s *nm;
-  enum MQTTErrors mqtterr;
+  int mqtterr;
   char payload[NET_ALERT_JSON_SZ];
   const char *topic;
   int len;
