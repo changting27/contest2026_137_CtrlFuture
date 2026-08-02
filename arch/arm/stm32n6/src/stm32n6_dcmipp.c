@@ -43,10 +43,14 @@
 #include <nuttx/config.h>
 #include <nuttx/video/imgdata.h>
 #include <nuttx/irq.h>
+#include <stdint.h>
 #include <syslog.h>
 #include <string.h>
 #include <errno.h>
 
+#include "arm_internal.h"
+#include "hardware/stm32_rcc.h"
+#include "hardware/stm32_dcmipp.h"
 #include "stm32n6_dcmipp.h"
 
 /****************************************************************************
@@ -168,9 +172,18 @@ static int stm32n6_dcmipp_data_init(FAR struct imgdata_s *data)
   priv->capture_cb  = NULL;
   priv->capture_arg = NULL;
 
-  /* TODO(RM): enable DCMIPP clock in RCC, deassert reset, configure the
-   * parallel/CSI input interface and the pipe muxing registers.
+  /* Enable the DCMIPP peripheral clock (atomic read-modify-write). */
+
+  modifyreg32(STM32_RCC_APB5ENR, 0, RCC_APB5ENR_DCMIPPEN);
+
+  /* Select the 8-bit parallel interface as the capture input.  The
+   * embedded-sync path is left disabled (hardware VSYNC/HSYNC), and the
+   * default active-high sync / rising-edge pixel-clock polarities are
+   * used.  TODO(RM): make the polarities board/sensor configurable once
+   * the camera module part is fixed.
    */
+
+  putreg32(0, STM32_DCMIPP_CMCR);   /* INSEL = 0 -> parallel input */
 
   syslog(LOG_INFO, "dcmipp: imgdata backend initialized\n");
   return OK;
@@ -191,7 +204,15 @@ static int stm32n6_dcmipp_data_uninit(FAR struct imgdata_s *data)
 
   priv->streaming = false;
 
-  /* TODO(RM): disable pipe capture, mask interrupts, gate DCMIPP clock. */
+  /* Stop any active Pipe0 capture, mask its interrupt, disable the pipe
+   * and gate the DCMIPP clock.
+   */
+
+  modifyreg32(STM32_DCMIPP_P0FCTCR, DCMIPP_P0FCTCR_CPTREQ, 0);
+  putreg32(0, STM32_DCMIPP_P0IER);
+  modifyreg32(STM32_DCMIPP_P0FSCR, DCMIPP_P0FSCR_PIPEN, 0);
+
+  modifyreg32(STM32_RCC_APB5ENR, RCC_APB5ENR_DCMIPPEN, 0);
 
   return OK;
 }
@@ -224,9 +245,11 @@ static int stm32n6_dcmipp_data_set_buf(FAR struct imgdata_s *data,
   priv->buf_addr = addr;
   priv->buf_size = size;
 
-  /* TODO(RM): write addr to the pipe's DMA destination register
-   * (DCMIPP_PxPPM0AR1) so the next frame lands in this buffer.
+  /* Point Pipe0's pixel-packer memory-0 destination at this buffer so
+   * the next frame lands here.  The address must be word-aligned.
    */
+
+  putreg32((uint32_t)(uintptr_t)addr, STM32_DCMIPP_P0PPM0AR1);
 
   return OK;
 }
@@ -288,6 +311,7 @@ static int stm32n6_dcmipp_data_start_capture(FAR struct imgdata_s *data,
 {
   FAR struct stm32n6_dcmipp_data_s *priv =
     (FAR struct stm32n6_dcmipp_data_s *)data;
+  uint32_t regval;
 
   if (nr_datafmts < 1 || datafmts == NULL)
     {
@@ -303,10 +327,34 @@ static int stm32n6_dcmipp_data_start_capture(FAR struct imgdata_s *data,
   priv->capture_arg = arg;
   priv->streaming   = true;
 
-  /* TODO(RM): configure pipe pixel format / crop / downsize registers
-   * for width x height, enable the frame-complete interrupt and set the
-   * pipe capture-enable bit (DCMIPP_PxFCTCR / DCMIPP_CMCR).
+  /* Configure the 8-bit parallel input.  RGB565 is the only format wired
+   * through here today; UYVY/YUYV are accepted by validate_frame_setting
+   * but their PRCR input codes are still TODO(RM).
    */
+
+  regval = DCMIPP_PRCR_ENABLE | DCMIPP_PRCR_EDM_8BIT;
+  if (priv->pixelformat == IMGDATA_PIX_FMT_RGB565)
+    {
+      regval |= DCMIPP_PRCR_FORMAT_RGB565;
+    }
+
+  putreg32(regval, STM32_DCMIPP_PRCR);
+
+  /* Pipe0 is a raw dump path (no colour processing); no output pixel
+   * format to program.  Route the input to Pipe0 and enable it.
+   */
+
+  putreg32(0, STM32_DCMIPP_P0PPCR);
+  modifyreg32(STM32_DCMIPP_P0FSCR, 0, DCMIPP_P0FSCR_PIPEN);
+
+  /* Continuous capture of every frame. */
+
+  putreg32(DCMIPP_P0FCTCR_FRATE_ALL, STM32_DCMIPP_P0FCTCR);
+
+  /* Enable the frame-complete interrupt, then request capture. */
+
+  putreg32(DCMIPP_P0INT_FRAME, STM32_DCMIPP_P0IER);
+  modifyreg32(STM32_DCMIPP_P0FCTCR, 0, DCMIPP_P0FCTCR_CPTREQ);
 
   syslog(LOG_INFO, "dcmipp: capture start %ux%u fmt=%lu\n",
          priv->width, priv->height,
@@ -331,7 +379,13 @@ static int stm32n6_dcmipp_data_stop_capture(FAR struct imgdata_s *data)
   priv->capture_cb  = NULL;
   priv->capture_arg = NULL;
 
-  /* TODO(RM): clear the pipe capture-enable bit and mask its interrupt. */
+  /* Clear the Pipe0 capture request, mask its interrupt and clear any
+   * pending frame flag.
+   */
+
+  modifyreg32(STM32_DCMIPP_P0FCTCR, DCMIPP_P0FCTCR_CPTREQ, 0);
+  putreg32(0, STM32_DCMIPP_P0IER);
+  putreg32(DCMIPP_P0INT_FRAME, STM32_DCMIPP_P0FCR);
 
   syslog(LOG_INFO, "dcmipp: capture stopped\n");
   return OK;
