@@ -94,9 +94,8 @@ struct recorder_context_s
   uint32_t state;
   uint32_t frame_count;
   uint32_t start_tick;
-  int output_fd;            /* Current output file descriptor */
-  void *encoder_handle;     /* H264EncInst */
-  void *input_buffer;       /* VENC input frame buffer */
+  int output_fd;            /* Current .h264 output file descriptor */
+  int codec_fd;             /* V4L2 M2M encoder node (/dev/video1), or -1 */
 };
 
 /****************************************************************************

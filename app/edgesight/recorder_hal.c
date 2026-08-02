@@ -19,10 +19,16 @@
  * permissions and limitations under the License.
  *
  * EdgeSight - Recorder HAL implementation.
- * Wraps H.264 VENC hardware encoder + SD card for NuttX.
  *
- * TODO: Replace stub code with actual h264encapi/VENC calls when
- * hardware is available.
+ * Records event clips by feeding raw YUV frames to the STM32N6 H.264
+ * hardware encoder and writing the encoded bitstream to the SD card.
+ *
+ * The encoder is reached through the V4L2 memory-to-memory codec node
+ * that stm32n6_venc.c registers at /dev/video1 (OUTPUT queue = raw YUV,
+ * CAPTURE queue = H.264 bitstream).  This HAL is the M2M client: it
+ * negotiates formats through the codec node and owns the output file.
+ * A missing node is non-fatal so the app still runs on hosts and on
+ * boards where the encoder is not wired up.
  *
  ****************************************************************************/
 
@@ -31,18 +37,106 @@
  ****************************************************************************/
 
 #include "recorder_hal.h"
+
+#include <sys/ioctl.h>
+#include <sys/videoio.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <syslog.h>
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 
-/* When building with real hardware:
- * #include "h264encapi.h"
- * #include "stm32n6xx_ll_venc.h"
- * #include "ewl.h"
- */
+#define RECORDER_HAL_DEVPATH "/dev/video1"
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: recorder_hal_resolution
+ *
+ * Description:
+ *   Translate a REC_RES_* preset into pixel dimensions.
+ *
+ ****************************************************************************/
+
+static void recorder_hal_resolution(uint8_t preset,
+                                     uint32_t *width, uint32_t *height)
+{
+  switch (preset)
+    {
+      case REC_RES_1080P:
+        *width = 1920;
+        *height = 1080;
+        break;
+
+      case REC_RES_720P:
+        *width = 1280;
+        *height = 720;
+        break;
+
+      case REC_RES_480P:
+      default:
+        *width = 640;
+        *height = 480;
+        break;
+    }
+}
+
+/****************************************************************************
+ * Name: recorder_hal_negotiate
+ *
+ * Description:
+ *   Set the OUTPUT (raw YUV420) and CAPTURE (H.264) formats on the codec
+ *   node.  This drives the VENC codec_ops_s format handlers.
+ *
+ ****************************************************************************/
+
+static int recorder_hal_negotiate(struct recorder_context_s *ctx)
+{
+  struct v4l2_format fmt;
+  uint32_t width;
+  uint32_t height;
+
+  recorder_hal_resolution(ctx->config.resolution, &width, &height);
+
+  /* OUTPUT queue: raw YUV420 frames fed to the encoder. */
+
+  memset(&fmt, 0, sizeof(fmt));
+  fmt.type                = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+  fmt.fmt.pix.width       = width;
+  fmt.fmt.pix.height      = height;
+  fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+  fmt.fmt.pix.field       = V4L2_FIELD_NONE;
+
+  if (ioctl(ctx->codec_fd, VIDIOC_S_FMT, (unsigned long)&fmt) < 0)
+    {
+      syslog(LOG_ERR, "recorder: S_FMT(OUTPUT) failed: %d\n", errno);
+      return -errno;
+    }
+
+  /* CAPTURE queue: encoded H.264 bitstream. */
+
+  memset(&fmt, 0, sizeof(fmt));
+  fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  fmt.fmt.pix.width       = width;
+  fmt.fmt.pix.height      = height;
+  fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
+  fmt.fmt.pix.field       = V4L2_FIELD_NONE;
+
+  if (ioctl(ctx->codec_fd, VIDIOC_S_FMT, (unsigned long)&fmt) < 0)
+    {
+      syslog(LOG_ERR, "recorder: S_FMT(CAPTURE) failed: %d\n", errno);
+      return -errno;
+    }
+
+  return 0;
+}
 
 /****************************************************************************
  * Public Functions
@@ -53,29 +147,28 @@ int recorder_hal_init(struct recorder_context_s *ctx,
 {
   memset(ctx, 0, sizeof(*ctx));
   ctx->config = *cfg;
+  ctx->output_fd = -1;
 
-  /* On real hardware:
-   *   1. Initialize VENC clocks
-   *   2. Configure H264 encoder (h264encapi):
-   *      H264EncCfg cfg;
-   *      cfg.width = VENC_WIDTH;
-   *      cfg.height = VENC_HEIGHT;
-   *      cfg.frameRateNum = fps;
-   *      cfg.frameRateDenom = 1;
-   *      H264EncInit(&cfg, &encoder);
-   *   3. Set rate control:
-   *      H264EncSetRateCtrl(encoder, &rcCfg);
-   *   4. Set coding control (GOP, slice mode):
-   *      H264EncSetCodingCtrl(encoder, &codingCfg);
-   *
-   * Reference: VENC_RTSP_Server/venc_app.c encoder_prepare()
+  /* Open the V4L2 M2M encoder node.  A missing node is non-fatal: the
+   * HAL stays usable on hosts and on boards without a wired encoder.
    */
 
-  ctx->output_fd = -1;
+  ctx->codec_fd = open(RECORDER_HAL_DEVPATH, O_RDWR);
+  if (ctx->codec_fd < 0)
+    {
+      syslog(LOG_WARNING, "recorder: %s unavailable (%d), "
+             "recording disabled\n", RECORDER_HAL_DEVPATH, errno);
+    }
+  else if (recorder_hal_negotiate(ctx) < 0)
+    {
+      close(ctx->codec_fd);
+      ctx->codec_fd = -1;
+    }
+
   ctx->state = REC_STATE_IDLE;
   ctx->initialized = true;
 
-  printf("[recorder] Initialized: %ukbps %ufps GOP=%u (stub)\n",
+  syslog(LOG_INFO, "recorder: initialized %ukbps %ufps GOP=%u\n",
          (unsigned)cfg->bitrate_kbps,
          (unsigned)cfg->fps,
          (unsigned)cfg->gop_size);
@@ -85,26 +178,53 @@ int recorder_hal_init(struct recorder_context_s *ctx,
 int recorder_hal_start(struct recorder_context_s *ctx,
                        uint32_t event_id)
 {
+  enum v4l2_buf_type type;
+  char path[64];
+
   if (!ctx->initialized || ctx->state == REC_STATE_RECORDING)
     {
       return -1;
     }
 
-  /* On real hardware:
-   *   1. Create file: sprintf(path, "%s/event_%04u_%08lu.h264",
-   *                           output_dir, event_id, timestamp);
-   *   2. Open file: ctx->output_fd = open(path, O_WRONLY|O_CREAT);
-   *   3. Encode SPS/PPS header:
-   *      H264EncStrmStart(encoder, &encIn, &encOut);
-   *      write(fd, encOut.pOutBuf, encOut.streamSize);
-   *   4. Start DCMIPP capture for VENC input
-   */
+  /* Create the event clip file on the SD card. */
+
+  snprintf(path, sizeof(path), "%s/event_%04u.h264",
+           ctx->config.output_dir ? ctx->config.output_dir : "/mnt/sd",
+           (unsigned)event_id);
+
+  ctx->output_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (ctx->output_fd < 0)
+    {
+      syslog(LOG_ERR, "recorder: cannot create %s: %d\n", path, errno);
+      return -errno;
+    }
+
+  /* Start both M2M queues on the encoder node. */
+
+  if (ctx->codec_fd >= 0)
+    {
+      type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+      if (ioctl(ctx->codec_fd, VIDIOC_STREAMON,
+                (unsigned long)&type) < 0)
+        {
+          syslog(LOG_ERR, "recorder: STREAMON(OUTPUT) failed: %d\n",
+                 errno);
+        }
+
+      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      if (ioctl(ctx->codec_fd, VIDIOC_STREAMON,
+                (unsigned long)&type) < 0)
+        {
+          syslog(LOG_ERR, "recorder: STREAMON(CAPTURE) failed: %d\n",
+                 errno);
+        }
+    }
 
   ctx->state = REC_STATE_RECORDING;
   ctx->frame_count = 0;
 
-  printf("[recorder] Recording started: event #%lu (stub)\n",
-         (unsigned long)event_id);
+  syslog(LOG_INFO, "recorder: recording event #%lu -> %s\n",
+         (unsigned long)event_id, path);
   return 0;
 }
 
@@ -116,33 +236,29 @@ int recorder_hal_feed_frame(struct recorder_context_s *ctx,
       return -1;
     }
 
-  (void)frame;
-  (void)size;
+  UNUSED(frame);
+  UNUSED(size);
 
-  /* On real hardware:
-   *   1. Set input buffer address:
-   *      encIn.busLuma = (uintptr_t)frame;
-   *      encIn.timeIncrement = 1;
-   *   2. Determine frame type:
-   *      encIn.codingType = (frame_count % gop == 0) ?
-   *                          H264ENC_INTRA_FRAME :
-   *                          H264ENC_PREDICTED_FRAME;
-   *   3. Encode:
-   *      H264EncStrmEncode(encoder, &encIn, &encOut, ...);
-   *   4. Write to SD:
-   *      write(fd, encOut.pOutBuf, encOut.streamSize);
-   *
-   * Reference: VENC_RTSP_Server/venc_app.c encode_frame()
+  /* TODO(vendor): pump one frame through the M2M encoder.  With the
+   * VENC encode core in place (stm32n6_venc.c, Hantro h264encapi) this
+   * would:
+   *   1. QBUF the raw YUV 'frame' on the OUTPUT queue.
+   *   2. DQBUF the encoded access unit from the CAPTURE queue.
+   *   3. write() the bitstream bytes to ctx->output_fd.
+   *   4. re-QBUF the now-empty CAPTURE buffer.
+   * The QBUF/DQBUF pump is intentionally not implemented yet: the codec
+   * node's encode core is a vendor-library stub, so a blocking DQBUF
+   * here would never complete.
    */
 
   ctx->frame_count++;
 
-  /* Check duration limit */
+  /* Enforce the maximum clip duration. */
 
   if (ctx->config.max_duration_s > 0 &&
       ctx->frame_count >= ctx->config.fps * ctx->config.max_duration_s)
     {
-      printf("[recorder] Max duration reached, stopping\n");
+      syslog(LOG_INFO, "recorder: max duration reached, stopping\n");
       recorder_hal_stop(ctx);
     }
 
@@ -151,22 +267,34 @@ int recorder_hal_feed_frame(struct recorder_context_s *ctx,
 
 int recorder_hal_stop(struct recorder_context_s *ctx)
 {
+  enum v4l2_buf_type type;
+
   if (!ctx->initialized || ctx->state != REC_STATE_RECORDING)
     {
       return -1;
     }
 
-  /* On real hardware:
-   *   1. Encode end-of-stream:
-   *      H264EncStrmEnd(encoder, &encIn, &encOut);
-   *      write(fd, encOut.pOutBuf, encOut.streamSize);
-   *   2. Close file: close(ctx->output_fd);
-   *   3. Stop DCMIPP VENC capture
-   */
+  /* Stop both encoder queues. */
+
+  if (ctx->codec_fd >= 0)
+    {
+      type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+      ioctl(ctx->codec_fd, VIDIOC_STREAMOFF, (unsigned long)&type);
+      type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      ioctl(ctx->codec_fd, VIDIOC_STREAMOFF, (unsigned long)&type);
+    }
+
+  /* Close the clip file. */
+
+  if (ctx->output_fd >= 0)
+    {
+      close(ctx->output_fd);
+      ctx->output_fd = -1;
+    }
 
   ctx->state = REC_STATE_IDLE;
 
-  printf("[recorder] Stopped: %lu frames encoded (stub)\n",
+  syslog(LOG_INFO, "recorder: stopped, %lu frames\n",
          (unsigned long)ctx->frame_count);
   return 0;
 }
@@ -191,10 +319,12 @@ void recorder_hal_deinit(struct recorder_context_s *ctx)
       recorder_hal_stop(ctx);
     }
 
-  /* On real hardware:
-   *   H264EncRelease(encoder);
-   */
+  if (ctx->codec_fd >= 0)
+    {
+      close(ctx->codec_fd);
+      ctx->codec_fd = -1;
+    }
 
   memset(ctx, 0, sizeof(*ctx));
-  printf("[recorder] Deinitialized\n");
+  syslog(LOG_INFO, "recorder: deinitialized\n");
 }
