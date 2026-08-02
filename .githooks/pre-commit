@@ -5,11 +5,30 @@
 #   git config core.hooksPath .githooks
 
 WORKSPACE="$(git rev-parse --show-toplevel)/.."
-NXSTYLE="$WORKSPACE/nuttx/tools/nxstyle"
 
+# Locate the NuttX tools directory.  The nuttx tree may sit directly under
+# the workspace or one level down inside an "openvela" checkout.
+NXTOOLS=""
+for cand in "$WORKSPACE/nuttx/tools" "$WORKSPACE/openvela/nuttx/tools"; do
+  if [ -f "$cand/nxstyle.c" ]; then
+    NXTOOLS="$cand"
+    break
+  fi
+done
+
+if [ -z "$NXTOOLS" ]; then
+  echo "WARNING: nuttx tools not found, skipping style check"
+  exit 0
+fi
+
+NXSTYLE="$NXTOOLS/nxstyle"
+
+# Build nxstyle with the host compiler if missing.  nxstyle is a plain
+# host utility, so compile the source directly rather than going through
+# Makefile.host (which pulls in the cross toolchain).
 if [ ! -x "$NXSTYLE" ]; then
   echo "nxstyle not found, building..."
-  make -C "$WORKSPACE/nuttx/tools" -f Makefile.host nxstyle 2>/dev/null
+  cc -o "$NXSTYLE" "$NXTOOLS/nxstyle.c" 2>/dev/null
 fi
 
 if [ ! -x "$NXSTYLE" ]; then
