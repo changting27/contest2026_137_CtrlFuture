@@ -112,6 +112,8 @@ static int edgesight_hw_init(void)
   struct camera_pipe_config_s display_pipe;
   struct camera_pipe_config_s nn_pipe;
   struct display_config_s display_cfg;
+  struct recorder_config_s rec_cfg;
+  struct network_config_s net_cfg;
   int ret;
 
   printf("[edgesight] Initializing hardware...\n");
@@ -164,6 +166,33 @@ static int edgesight_hw_init(void)
   /* Environmental sensors */
 
   env_sensor_init(&g_app.env_sensor);
+
+  /* Event recorder (H.264 via the VENC M2M codec).  Map the persisted
+   * record settings onto the HAL config; clips land on the SD card.
+   */
+
+  memset(&rec_cfg, 0, sizeof(rec_cfg));
+  rec_cfg.resolution     = REC_RES_720P;
+  rec_cfg.bitrate_kbps   = g_app.config.record.bitrate_kbps;
+  rec_cfg.fps            = g_app.config.record.fps;
+  rec_cfg.gop_size       = g_app.config.record.gop_size;
+  rec_cfg.max_duration_s = g_app.config.record.max_duration_s;
+  rec_cfg.output_dir     = "/mnt/sd";
+  recorder_hal_init(&g_app.recorder, &rec_cfg);
+
+  /* Network alerting (MQTT).  Map the persisted network settings onto
+   * the HAL config and attempt an initial broker connection; failure is
+   * non-fatal and retried from the main loop.
+   */
+
+  memset(&net_cfg, 0, sizeof(net_cfg));
+  net_cfg.use_dhcp        = true;
+  net_cfg.mqtt_broker     = g_app.config.network.mqtt_broker;
+  net_cfg.mqtt_port       = g_app.config.network.mqtt_port;
+  net_cfg.mqtt_client_id  = g_app.config.network.device_id;
+  net_cfg.mqtt_topic      = g_app.config.network.mqtt_topic;
+  network_hal_init(&g_app.network, &net_cfg);
+  network_hal_connect(&g_app.network);
 
   printf("[edgesight] Hardware init complete.\n");
   return 0;
@@ -264,9 +293,27 @@ static void edgesight_loop(struct edgesight_app_s *app)
                           decision.description,
                           (double)decision.confidence);
 
-          if (!app->recording)
+          /* Start an event clip on the first fall of a burst. */
+
+          if (!app->recording && app->config.auto_record)
             {
+              recorder_hal_start(&app->recorder, app->fall_count);
               app->recording = true;
+            }
+
+          /* Push an MQTT alert to the monitoring station. */
+
+          if (app->config.auto_alert)
+            {
+              struct alert_message_s alert;
+
+              memset(&alert, 0, sizeof(alert));
+              alert.level        = ALERT_LEVEL_CRITICAL;
+              alert.timestamp    = app->frame_count;
+              alert.confidence   = decision.confidence;
+              alert.frame_number = app->frame_count;
+              alert.description  = decision.description;
+              network_hal_send_alert(&app->network, &alert);
             }
 
           display_hal_show_alert(&app->display,
@@ -294,16 +341,35 @@ static void edgesight_loop(struct edgesight_app_s *app)
       display_hal_draw_stats(&app->display, &stats);
       display_hal_swap(&app->display);
 
-      /* Recording feed */
+      /* Recording feed.  The camera frame buffer is not plumbed through
+       * this scaffold yet (npu_pipeline_run is fed NULL), so drive the
+       * recorder per tick: this advances the frame count and enforces the
+       * clip duration limit.  The encoder QBUF/DQBUF pump inside
+       * recorder_hal_feed_frame takes over once a real YUV source and the
+       * VENC encode core are in place.  The recorder clears its own state
+       * back to idle when the clip completes.
+       */
 
       if (app->recording)
         {
-          /* TODO: recorder_hal_feed_frame */
+          recorder_hal_feed_frame(&app->recorder, NULL, 0);
+
+          /* feed_frame auto-stops the clip once the duration limit is
+           * reached, resetting the recorder to idle; mirror that back
+           * into the app flag so a new fall can start a fresh clip.
+           */
+
+          if (app->recorder.state != REC_STATE_RECORDING)
+            {
+              app->recording = false;
+            }
         }
 
-      /* Network keepalive */
+      /* Network keepalive: services MQTT keep-alive pings and flushes
+       * any queued PUBLISH packets; reconnects on transport error.
+       */
 
-      /* network_hal_poll(&app->network); */
+      network_hal_poll(&app->network);
 
       /* Update statistics */
 
@@ -457,7 +523,10 @@ int main(int argc, char *argv[])
 
   edgesight_loop(&g_app);
 
-  /* Shutdown */
+  /* Shutdown: release the HALs the loop was driving. */
+
+  recorder_hal_deinit(&g_app.recorder);
+  network_hal_deinit(&g_app.network);
 
   event_log_write(&g_app.log, EVENT_LEVEL_INFO,
                   g_app.frame_count,
