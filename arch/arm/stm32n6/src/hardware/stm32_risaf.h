@@ -113,7 +113,7 @@
  */
 
 #define STM32_RISAF_REG_STARTR      0x0004     /* Region start offset (rel) */
-#define STM32_RISAF_REG_ENDR        0x0008     /* Region end offset (rel,inc)*/
+#define STM32_RISAF_REG_ENDR        0x0008     /* Region end offset(rel,inc)*/
 #define STM32_RISAF_REG_CIDCFGR     0x000c
 #  define RISAF_REG_CIDCFGR_RDEN_SHIFT  0      /* Bits 0-7: read whitelist */
 #  define RISAF_REG_CIDCFGR_WREN_SHIFT  16     /* Bits 16-23: write list */
@@ -125,7 +125,7 @@
  */
 
 #define RISAF_CIDMASK_CID0          (1 << 0)
-#define RISAF_CIDMASK_CID1          (1 << 1)   /* CPU / TDCID -- keep always */
+#define RISAF_CIDMASK_CID1          (1 << 1)   /* CPU/TDCID -- keep always */
 #define RISAF_CIDCFGR_RW(cidmask) \
   (((cidmask) << RISAF_REG_CIDCFGR_RDEN_SHIFT) | \
    ((cidmask) << RISAF_REG_CIDCFGR_WREN_SHIFT))
