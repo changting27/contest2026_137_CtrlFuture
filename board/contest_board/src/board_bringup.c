@@ -40,6 +40,7 @@
 #ifdef CONFIG_ARCH_CHIP_STM32N6
 #  include "arm_internal.h"
 #  include "stm32n6_dcmipp.h"
+#  include "stm32n6_venc.h"
 #  include "stm32n6_ltdc.h"
 #  include "stm32n6_rtc.h"
 #  ifdef CONFIG_VIDEO_STREAM
@@ -389,6 +390,17 @@ static int board_bringup(void)
     {
       syslog(LOG_ERR,
              "ERROR: camera capture register failed: %d\n", ret);
+    }
+
+  /* Register the H.264 hardware encoder as a V4L2 M2M codec at
+   * /dev/video1 (OUTPUT = raw YUV, CAPTURE = encoded H.264 bitstream).
+   */
+
+  ret = stm32n6_venc_register("/dev/video1");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "ERROR: VENC codec register failed: %d\n", ret);
     }
 #  endif
 

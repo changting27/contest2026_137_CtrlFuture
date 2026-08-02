@@ -30,6 +30,7 @@ CHIP_CSRCS += stm32n6_idle.c
 ifeq ($(CONFIG_VIDEO_STREAM),y)
   CHIP_CSRCS += stm32n6_dcmipp.c
   CHIP_CSRCS += stm32n6_dcmipp_sensor.c
+  CHIP_CSRCS += stm32n6_venc.c
 endif
 
 ifeq ($(CONFIG_VIDEO_FB),y)
