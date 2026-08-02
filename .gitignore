@@ -5,3 +5,11 @@ scripts/hw-verify.sh
 scripts/hw-verify-drivertest.sh
 scripts/hw-verify-watchdog.sh
 scripts/hw-verify-adc.sh
+
+# NuttX build artifacts (produced in-tree by the app build)
+*.o
+*.obj
+*.a
+.built
+.depend
+Make.dep
